@@ -1,6 +1,6 @@
 # Ring Buffer Implementation
 
-This project implements an **atomic ring buffer** based on the **LMAX Disruptor** algorithm. The ring buffer is designed for **high-performance, lock-free inter-thread communication**.
+This project implements an atomic ring buffer inspired by the LMAX Disruptor algorithm. The ring buffer is designed for high-performance, lock-free inter-thread communication.
 
 ## Features
 - **Lock-free design** for fast producer-consumer communication.
@@ -23,22 +23,22 @@ This project implements an **atomic ring buffer** based on the **LMAX Disruptor*
 | **Thread Safety** | Requires mutexes | Requires synchronization | Lock-free |
 
 ### **Linked List Queues vs. Ring Buffer**
-- **Linked lists** require **dynamic memory allocation**, which is costly in high-speed operations.
-- **Ring buffers** use **preallocated fixed memory**, avoiding heap fragmentation and reducing cache misses.
-- **Ring buffers** provide **constant-time complexity (O(1))** for both enqueue and dequeue operations, while linked lists have overhead due to pointer dereferencing.
+- **Linked lists** require dynamic memory allocation, which is costly in high-speed operations.
+- **Ring buffers** use preallocated fixed memory, avoiding heap fragmentation and reducing cache misses.
+- **Ring buffers** provide constant-time complexity (**O(1)**) for both enqueue and dequeue operations, while linked lists have overhead due to pointer dereferencing.
 
 ### **Mutex-based Queues vs. Atomic Ring Buffer**
 - **Mutexes introduce contention** in high-frequency producer-consumer interactions.
 - **The ring buffer is lock-free**, avoiding thread contention and context switching delays.
 - **Better scalability** for multi-threaded applications compared to mutex-based synchronization.
-- **No kernel calls involved**: Unlike mutex-based solutions that rely on system calls, this ring buffer operates **entirely in user space**, leveraging atomic operations to ensure high-speed execution without kernel overhead.
+- **No kernel calls involved**: Unlike mutex-based solutions that rely on system calls, this ring buffer operates entirely in user space, leveraging atomic operations to ensure high-speed execution without kernel overhead.
 
 ## Performance
 - **Tested on Intel Nuke (Intel(R) Core(TM) i7-10710U CPU @ 1.10GHz)**.
-- **Achieves 70 to 160 million integer transfers per second** between two threads.
-- **Other high-performance algorithms tested reach at most 30 million per second**.
-- **Linked list-based and POSIX IPC solutions only achieve 2-3 million per second**, demonstrating the significant advantage of this ring buffer for high-speed inter-thread communication.
-- **Running with Valgrind**: Shows **zero errors**.
+- **Achieves 70 to 160 million** integer transfers per second between two threads.
+- **Other high-performance algorithms** tested reach at most 30 million per second.
+- **Linked list-based and POSIX IPC solutions** only achieve 2-3 million per second, demonstrating the significant advantage of this ring buffer for high-speed inter-thread communication.
+- **Running with Valgrind**: Shows zero errors.
 - **Memory usage**: 139,685 bytes allocated as reported by Valgrind.
 
 ## Compilation
@@ -87,10 +87,10 @@ To use the ring buffer in your own project:
 - **Scalability**: Can handle multiple producers/consumers with atomic operations.
 - **CPU Cache efficiency**: Avoids frequent heap access, optimizing memory locality.
 - **High Throughput**: Lock-free structure ensures maximum throughput in multi-threaded environments.
-- **Optimized Memory Layout**: The ring buffer and its internal array are allocated as a **single contiguous memory block**, significantly improving CPU cache utilization and reducing cache misses.
-- **Inter-Process Communication (IPC) Support**: This ring buffer can be placed in **shared memory**, allowing efficient communication between processes without the overhead of system calls.
-- **Pure user-space execution**: The ring buffer operates **entirely in user space**, relying only on atomic operations rather than kernel locks or system calls, ensuring low overhead and high efficiency.
-- **No pthread dependency**: The ring buffer does **not** use `pthread` internally. The test program uses `pthread` only for benchmarking, but the ring buffer itself is fully independent of thread libraries.
+- **Optimized Memory Layout**: The ring buffer and its internal array are allocated as a single contiguous memory block, significantly improving CPU cache utilization and reducing cache misses.
+- **Inter-Process Communication (IPC) Support**: This ring buffer can be placed in shared memory, allowing efficient communication between processes without the overhead of system calls.
+- **Pure user-space execution**: The ring buffer operates entirely in user space, relying only on atomic operations rather than kernel locks or system calls, ensuring low overhead and high efficiency.
+- **No pthread dependency**: The ring buffer does not use `pthread` internally. The test program uses `pthread` only for benchmarking, but the ring buffer itself is fully independent of thread libraries.
 
 ## Dependencies
 - **GCC (GNU Compiler Collection)**
@@ -100,4 +100,4 @@ To use the ring buffer in your own project:
 This project is released under the **GNU GENERAL PUBLIC LICENSE**. Feel free to modify and distribute.
 
 ---
-Developed by **Sebastian Mountaniol** (04/03/2025).
+Developed by Sebastian Mountaniol (04/03/2025).
