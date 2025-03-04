@@ -78,7 +78,7 @@ void rb_destroy(ring_buf_t *d)
  *         is invalid.
  * @details 
  */
-int rb_push(ring_buf_t *d, void *data, size_t size)
+int rb_push_ptr(ring_buf_t *d, void *data, size_t size)
 {
     if (!d) return RB_PARAM_ERROR;
 
@@ -109,7 +109,7 @@ int rb_push(ring_buf_t *d, void *data, size_t size)
  *         Buffer is empty
  * @details 
  */
-int rb_pull(ring_buf_t *d, void **data, size_t *size)
+int rb_pull_ptr(ring_buf_t *d, void **data, size_t *size)
 {
     if (!d || !data || *data || *size) return RB_PARAM_ERROR;
 
