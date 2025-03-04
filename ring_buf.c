@@ -3,7 +3,7 @@
 #endif
 
 /**
- * THis file implements atomic Ring Buffer, based on LMAX Disruptor algorythm.
+ * This file implements an atomic Ring Buffer inspired by the LMAX Disruptor algorithm.
  */
 
 #define _POSIX_C_SOURCE 200112L  // Enables POSIX API, including posix_memalign
@@ -60,9 +60,8 @@ ring_buf_t *rb_alloc_init(size_t num_cells, size_t max_alloc_size)
 
 /**
  * @author Sebastian Mountaniol (04/03/2025)
- * @brief Deinint and remove the Ring Buffer structure
- * @param ring_buf_t* d     
- * @details 
+ * @brief release the Ring Buffer structure
+ * @param ring_buf_t* d     Pointer to the Ring Buffer to free
  */
 void rb_destroy(ring_buf_t *d)
 {
@@ -75,7 +74,8 @@ void rb_destroy(ring_buf_t *d)
  * @param ring_buf_t* d     Ring Buffer structure
  * @param void* data  Pointer to a buffer to save
  * @param size_t size  Size of the saved buffer
- * @return int OK (0) if saved, an error otherwise
+ * @return int RB_OK (0) if saved, RB_FULL if the Ring Buffer is full, RB_PARAM_ERROR if one of input poiters
+ *         is invalid.
  * @details 
  */
 int rb_push(ring_buf_t *d, void *data, size_t size)
@@ -99,6 +99,16 @@ int rb_push(ring_buf_t *d, void *data, size_t size)
     return RB_OK;
 }
 
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Pull next buffer from the Ring Buffer
+ * @param ring_buf_t* d     Pointer to the Ring Buffer structure
+ * @param void** data  Double pointer; the poiter to a buffer will be copyed into 
+ * @param size_t* size  Size of returned buffer
+ * @return int RB_OK on success, RB_PARAM_ERROR if one of input poiters is invalid; RB_EMPTY if the Ring
+ *         Buffer is empty
+ * @details 
+ */
 int rb_pull(ring_buf_t *d, void **data, size_t *size)
 {
     if (!d || !data || *data || *size) return RB_PARAM_ERROR;
@@ -120,6 +130,15 @@ int rb_pull(ring_buf_t *d, void **data, size_t *size)
     return RB_OK;
 }
 
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Push an integer value to Ring Buffer
+ * @param ring_buf_t* d     Pointer to the Ring Buffer structure
+ * @param int64_t idata Integer value to save into the Ring Buffer
+ * @return int RB_OK if the integer value saved, RB_PARAM_ERROR if structure poiter is invalid; RB_FULL if the
+ *         ring buffer is full
+ * @details 
+ */
 __attribute__((hot))
 int rb_push_int(ring_buf_t *d, int64_t idata)
 {
@@ -141,6 +160,15 @@ int rb_push_int(ring_buf_t *d, int64_t idata)
     return RB_OK;
 }
 
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Extract an integer value from the Ring Buffer
+ * @param ring_buf_t* d     Pointer to the Ring Buffer structure
+ * @param int64_t* idata Pointer to integer, the value will be copied into
+ * @return int RB_OK if a value extracted; RB_PARAM_ERROR if one of pointers is invalid; RB_EMPTY is the Ring
+ *         Buffer is empty
+ * @details 
+ */
 __attribute__((hot))
 int rb_pull_int(ring_buf_t *d, int64_t *idata)
 {
