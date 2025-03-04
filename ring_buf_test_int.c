@@ -16,16 +16,24 @@ const int loops_waiting = 10000;
 #define NUM_MESSAGES 500000000
 size_t arr_size = 4096 * 2;
 
-int num_cpus = 0;
-int cpu_prod = 1;
-int cpu_cons = 7;
 
-ring_buf_t *ring_buf;  // Shared ring buffer buffer
-volatile int producer_done = 0; // Flag to indicate producer completion
+/* What processor should it run? Notem these values will be replaced by find_two_least_busy_cores() */
+int cpu_prod = 0;
+int cpu_cons = 1;
 
-void find_two_least_busy_cores(void);
+/* Used to calculate number of "hard" misses, when the sched_yield() was called */
+int miss_push = 0;
+int miss_pull = 0;
 
-/* Get current time in nanoseconds */
+/* The Ring Buffer structure, shared between threads. */
+ring_buf_t *ring_buf = NULL;  // Shared ring buffer buffer
+
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Get current time in microseconds
+ * @return uint64_t Current time in microseconds
+ * @details Used to calculate the test result
+ */
 inline uint64_t get_time_ns(void)
 {
     struct timespec ts;
@@ -33,10 +41,15 @@ inline uint64_t get_time_ns(void)
     return (uint64_t)ts.tv_sec * 1e9 + ts.tv_nsec;
 }
 
-int misses_push = 0;
-int misses_pull = 0;
-
 __attribute__((hot))
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Push integer into the Ring Buffer, try to do it multiple time
+ * @param ring_buf_t* ring_buf the Ring Buffer structure poiter
+ * @param int64_t idata   An Integer value to save into the Ring Buffer
+ * @return int RB_FULL if could not push (the Ring Buffer is full), RB_OK if the integer saved into the Ring
+ *          Buffer
+ */
 inline int do_push(ring_buf_t *ring_buf, int64_t idata)
 {
     int rc = RB_FULL;
@@ -54,7 +67,7 @@ inline int do_push(ring_buf_t *ring_buf, int64_t idata)
         sched_yield();
         rc = rb_push_int(ring_buf, idata);
         if (rc != RB_OK) {
-            misses_push++;
+            miss_push++;
         }
     } while (rc != RB_OK);
 
@@ -63,6 +76,13 @@ inline int do_push(ring_buf_t *ring_buf, int64_t idata)
 
 
 __attribute__((hot))
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Pull integer value from the Ring Buffer
+ * @param ring_buf_t* ring_buf Pointer to the Ring Buffer strcuture
+ * @param int64_t* idata   Return value extracted from the Ring Buffer
+ * @return int RB_EMPTY if the Ring buffer is empty, RB_OK if an integer value extracted
+ */
 inline int do_pull(ring_buf_t *ring_buf, int64_t *idata)
 {
     int rc = RB_EMPTY;
@@ -79,7 +99,7 @@ inline int do_pull(ring_buf_t *ring_buf, int64_t *idata)
         cnt++;
         rc = rb_pull_int(ring_buf, idata);
         if (rc != RB_OK) {
-            misses_pull++;
+            miss_pull++;
         }
         sched_yield();
     } while (rc != RB_OK);
@@ -87,6 +107,12 @@ inline int do_pull(ring_buf_t *ring_buf, int64_t *idata)
     return rc;
 }
 
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Moves the caller thread to asked CPU
+ * @param int num   
+ * @details 
+ */
 void set_my_cpu(int num)
 {
     cpu_set_t cpuset;
@@ -97,6 +123,11 @@ void set_my_cpu(int num)
     }
 }
 
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Set thread scheduling algorithm (if you use it, you must run with sudo)
+ * @details 
+ */
 void set_my_prio(void)
 {
     int rc;
@@ -115,6 +146,13 @@ void set_my_prio(void)
 }
 
 /* Producer Thread: Sends NUM_MESSAGES messages */
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Producer thread: writes integers to the Ring Buffer
+ * @param void* arg   Ignored
+ * @return void* Ignored
+ * @details 
+ */
 void *producer(__attribute__((unused))void *arg)
 {
     set_my_cpu(cpu_prod);
@@ -130,14 +168,20 @@ void *producer(__attribute__((unused))void *arg)
 
     double elapsed_sec = (end_ns - start_ns) / 1e9;
     double throughput = NUM_MESSAGES / elapsed_sec;
-    printf("Producer finished in %.6f seconds, misses: %d\n", (end_ns - start_ns) / 1e9, misses_push);
+    printf("Producer finished in %.6f seconds, misses: %d\n", (end_ns - start_ns) / 1e9, miss_push);
     printf("Throughput: %'f messages/sec\n", throughput);
 
-    producer_done = 1; // Signal consumer to finish
     return NULL;
 }
 
 /* Consumer Thread: Receives NUM_MESSAGES messages */
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Reads integers from the Ring Buffer
+ * @param void* arg   Ignored
+ * @return void* Ignored
+ * @details 
+ */
 void *consumer(__attribute__((unused))void *arg)
 {
     set_my_cpu(cpu_cons);
@@ -160,7 +204,7 @@ void *consumer(__attribute__((unused))void *arg)
     double elapsed_sec = (end_ns - start_ns) / 1e9;
     double throughput = NUM_MESSAGES / elapsed_sec;
 
-    printf("Consumer finished in %.6f seconds, missses: %d\n", elapsed_sec, misses_pull);
+    printf("Consumer finished in %.6f seconds, missses: %d\n", elapsed_sec, miss_pull);
     printf("Throughput: %'f messages/sec\n", throughput);
     return NULL;
 }
@@ -169,14 +213,27 @@ typedef struct {
     long user, nice, system, idle, iowait, irq, softirq, steal;
 } cpu_stats_t;
 
-/* Computes total CPU time from stats */
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Helper: Computes total CPU time from stats
+ * @param cpu_stats_t* s     Stat of a single CPU core
+ * @return long Total time of CPU
+ * @details Used to find the least busy CPU core
+ */
 long total_time(cpu_stats_t *s)
 {
     return s->user + s->nice + s->system + s->idle +
            s->iowait + s->irq + s->softirq + s->steal;
 }
 
-/* Reads CPU stats from /proc/stat */
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Read stats from the /proc/stat
+ * @param cpu_stats_t* stats   Pointer to stst structure, it is an output of the function
+ * @param int num_cpus CPU core number to read
+ * @return int 0 on success, < 0 on an error
+ * @details 
+ */
 int get_cpu_stats(cpu_stats_t *stats, int num_cpus)
 {
     FILE *fp = fopen("/proc/stat", "r");
@@ -207,8 +264,14 @@ int get_cpu_stats(cpu_stats_t *stats, int num_cpus)
 }
 
 /* Finds the two least busy cores */
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Find two the least busy cores.
+ * @details The least busy cored assigned to gloabla variables cpu_prod and cpu_cons
+ */
 void find_two_least_busy_cores(void)
 {
+    int num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     cpu_stats_t stats_before[num_cpus], stats_after[num_cpus];
 
     if (get_cpu_stats(stats_before, num_cpus) < 0) return;
@@ -251,26 +314,32 @@ int main(void)
 {
     printf("Array size: %ld\n", arr_size);
     
-    setlocale(LC_ALL, ""); /* use user selected locale */
+    /* Just for nice printing */    
+    setlocale(LC_ALL, "");
+
+    /* Init the Ring Buffer strcuture + array. We want "arr_size" members, but not more than 1Mb allocation */
     ring_buf = rb_alloc_init(arr_size, 1024*1024);
+
+    /* Oops, could not allocate. Cry and die. */
     if (NULL == ring_buf) {
         fprintf(stderr, "Failed to initialize ring_buf.\n");
         return EXIT_FAILURE;
     }
 
-    num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    /* Read CPU core states, find two least busy to run the testing threads on them */
     find_two_least_busy_cores();
 
     pthread_t prod_thread, cons_thread;
 
-    // Start producer and consumer threads
+    /* Start producer and consumer threads */
     pthread_create(&prod_thread, NULL, producer, NULL);
     pthread_create(&cons_thread, NULL, consumer, NULL);
 
-    // Wait for both threads to complete
+    /* Wait for both threads to complete */
     pthread_join(prod_thread, NULL);
     pthread_join(cons_thread, NULL);
 
+    /* Release the Ring Buffer */
     rb_destroy(ring_buf);
     return EXIT_SUCCESS;
 }
