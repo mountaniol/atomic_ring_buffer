@@ -97,7 +97,7 @@ To use the ring buffer in your own project:
 - **POSIX-compliant OS** (Linux recommended)
 
 ## License
-This project is released under the **MIT License**. Feel free to modify and distribute.
+This project is released under the **GNU GENERAL PUBLIC LICENSE**. Feel free to modify and distribute.
 
 ---
 Developed by **Sebastian Mountaniol** (04/03/2025).
