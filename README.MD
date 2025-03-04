@@ -101,4 +101,3 @@ This project is released under the **GNU GENERAL PUBLIC LICENSE**. Feel free to 
 
 ---
 Developed by **Sebastian Mountaniol** (04/03/2025).
-
