@@ -8,36 +8,40 @@
 #include <locale.h>
 #include <sched.h>         // For CPU affinity
 #include <string.h>
-#include <math.h>          // sqrt() for latency stddev
+#include <stdint.h> // for AFL++
+
+//__AFL_FUZZ_INIT();
 
 #include "ring_buf.h"
 
+__AFL_FUZZ_INIT(void);
+
+
 /* This variable is used in helper functions fo_push() / do_pull() "*/
-const int loops_waiting = 10000;
-#define NUM_MESSAGES 500000000
-size_t arr_size = 4096 * 2;
 
-/* Latency sampling: every LAT_SAMPLE-th message is timestamped by the
- * producer into lat_sent_ns[] BEFORE the push; the consumer reads the slot
- * AFTER pulling that message, so the ring's own release/acquire publication
- * orders the accesses - no extra synchronization needed.  Slot count covers
- * far more in-flight samples than the ring can hold (8192/1024 = 8). */
-#define LAT_SAMPLE 1024
-#define LAT_SLOTS  64
-uint64_t lat_sent_ns[LAT_SLOTS];
-
+uint64_t mes_pushed = 0;
+uint64_t mes_pulled = 0;
 
 /* What processor should it run? Notem these values will be replaced by find_two_least_busy_cores() */
 int cpu_prod = 0;
 int cpu_cons = 1;
 
 /* Used to calculate number of "hard" misses, when the sched_yield() was called */
-int miss_push = 0;
-int miss_pull = 0;
 
 /* The Ring Buffer structure, shared between threads. */
 ring_buf_t *ring_buf = NULL;  // Shared ring buffer buffer
 
+/* AFL input params */
+typedef struct {
+    uint64_t num_messages;
+    uint32_t loops_waiting_line1;
+    uint32_t thread_start;
+    uint32_t num_mes_power2;
+    //uint32_t num_mes_bytes;
+} afl_input_t;
+
+
+afl_input_t afl_input;
 /**
  * @author Sebastian Mountaniol (04/03/2025)
  * @brief Get current time in microseconds
@@ -50,6 +54,21 @@ inline uint64_t get_time_ns(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1e9 + ts.tv_nsec;
 }
+
+ring_buf_t *rb_alloc_init_power_2(const uint64_t num_cells_bit, const uint64_t max_alloc_size_bytes)
+{
+    return rb_alloc_init(1 << num_cells_bit, max_alloc_size_bytes);
+}
+
+__attribute__((hot))
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Push integer into the Ring Buffer, try to do it multiple time
+ * @param rb_t* ring_buf the Ring Buffer structure poiter
+ * @param int64_t idata   An Integer value to save into the Ring Buffer
+ * @return int RB_FULL if could not push (the Ring Buffer is full), RB_OK if the integer saved into the Ring
+ *          Buffer
+ */
 
 __attribute__((hot))
 /**
@@ -64,7 +83,7 @@ inline int do_push(ring_buf_t *ring_buf, int64_t idata)
 {
     int rc = RB_FULL;
 
-    for (int i = 0; i < loops_waiting; i++) {
+    for (uint32_t i = 0; i < afl_input.loops_waiting_line1; i++) {
         rc = rb_push_int(ring_buf, idata);
         if (RB_OK == rc) {
             return RB_OK;
@@ -76,16 +95,19 @@ inline int do_push(ring_buf_t *ring_buf, int64_t idata)
         cnt++;
         sched_yield();
         rc = rb_push_int(ring_buf, idata);
-        if (rc != RB_OK) {
-            miss_push++;
-        }
     } while (rc != RB_OK);
 
     return rc;
 }
 
-
 __attribute__((hot))
+/**
+ * @author Sebastian Mountaniol (04/03/2025)
+ * @brief Pull integer value from the Ring Buffer
+ * @param rb_t* ring_buf Pointer to the Ring Buffer strcuture
+ * @param int64_t* idata   Return value extracted from the Ring Buffer
+ * @return int RB_EMPTY if the Ring buffer is empty, RB_OK if an integer value extracted
+ */
 /**
  * @author Sebastian Mountaniol (04/03/2025)
  * @brief Pull integer value from the Ring Buffer
@@ -97,7 +119,7 @@ inline int do_pull(ring_buf_t *ring_buf, int64_t *idata)
 {
     int rc = RB_EMPTY;
 
-    for (int i = 0; i < loops_waiting; i++) {
+    for (uint32_t i = 0; i < afl_input.loops_waiting_line1; i++) {
         rc = rb_pull_int(ring_buf, idata);
         if (RB_OK == rc) {
             return RB_OK;
@@ -108,9 +130,6 @@ inline int do_pull(ring_buf_t *ring_buf, int64_t *idata)
     do {
         cnt++;
         rc = rb_pull_int(ring_buf, idata);
-        if (rc != RB_OK) {
-            miss_pull++;
-        }
         sched_yield();
     } while (rc != RB_OK);
 
@@ -165,25 +184,14 @@ void set_my_prio(void)
  */
 void *producer(__attribute__((unused))void *arg)
 {
-    set_my_cpu(cpu_prod);
+    //set_my_cpu(cpu_prod);
     set_my_prio();
-    uint64_t start_ns = get_time_ns(); // Start time
 
+    //abort();
 
-    for (int64_t i = 0; i < NUM_MESSAGES; i++) {
-        if (0 == (i & (LAT_SAMPLE - 1)))
-            lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
-        do_push(ring_buf, i);
+    for (mes_pushed = 0; mes_pushed < afl_input.num_messages; mes_pushed++) {
+        do_push(ring_buf, mes_pushed);
     }
-
-    uint64_t end_ns = get_time_ns(); // End time
-
-    double elapsed_sec = (end_ns - start_ns) / 1e9;
-    double throughput = NUM_MESSAGES / elapsed_sec;
-    printf("Producer finished in %.6f seconds, misses: %d\n", (end_ns - start_ns) / 1e9, miss_push);
-    printf("Throughput: %'f messages/sec\n", throughput);
-    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / NUM_MESSAGES);
-
     return NULL;
 }
 
@@ -197,47 +205,19 @@ void *producer(__attribute__((unused))void *arg)
  */
 void *consumer(__attribute__((unused))void *arg)
 {
-    set_my_cpu(cpu_cons);
+    //set_my_cpu(cpu_cons);
     set_my_prio();
 
-    double lat_sum = 0, lat_sum2 = 0, lat_min = 1e18, lat_max = 0;
-    long lat_n = 0;
+    for (mes_pulled = 0; mes_pulled < afl_input.num_messages; mes_pulled++) {
+        uint64_t idata;
 
-    uint64_t start_ns = get_time_ns(); // Start time
+        do_pull(ring_buf, (int64_t *)&idata);
 
-    for (long i = 0; i < NUM_MESSAGES; i++) {
-        int64_t idata;
-
-        do_pull(ring_buf, &idata);
-
-        if (idata != i) {
-            printf("Expected payload %ld but it is %ld\n", i, idata);
+        if (idata != mes_pulled) {
+            printf("Expected payload %lu but it is %lu\n", mes_pulled, idata);
             abort();
         }
-
-        if (0 == (i & (LAT_SAMPLE - 1))) {
-            double d = (double)(get_time_ns() -
-                                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
-            lat_n++;
-            lat_sum += d;
-            lat_sum2 += d * d;
-            if (d < lat_min) lat_min = d;
-            if (d > lat_max) lat_max = d;
-        }
     }
-
-    uint64_t end_ns = get_time_ns(); // End time
-    double elapsed_sec = (end_ns - start_ns) / 1e9;
-    double throughput = NUM_MESSAGES / elapsed_sec;
-
-    printf("Consumer finished in %.6f seconds, missses: %d\n", elapsed_sec, miss_pull);
-    printf("Throughput: %'f messages/sec\n", throughput);
-    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / NUM_MESSAGES);
-
-    double lat_mean = lat_sum / lat_n;
-    printf("Latency (every %dth msg, %ld samples): min %.0f ns, mean %.0f ns, "
-           "max %.0f ns, stddev %.0f ns\n", LAT_SAMPLE, lat_n, lat_min,
-           lat_mean, lat_max, sqrt(lat_sum2 / lat_n - lat_mean * lat_mean));
     return NULL;
 }
 
@@ -252,10 +232,9 @@ typedef struct {
  * @return long Total time of CPU
  * @details Used to find the least busy CPU core
  */
-long total_time(cpu_stats_t *s)
+long total_time(const cpu_stats_t *s)
 {
-    return s->user + s->nice + s->system + s->idle +
-           s->iowait + s->irq + s->softirq + s->steal;
+    return s->user + s->nice + s->system + s->idle + s->iowait + s->irq + s->softirq + s->steal;
 }
 
 /**
@@ -342,102 +321,94 @@ void find_two_least_busy_cores(void)
     cpu_prod = min_core2;
 }
 
-/**
- * @brief Returns the HT sibling of a CPU, or -1 if it has none
- * @param int cpu   Logical CPU number
- * @return int Sibling logical CPU, or -1
- */
-int sibling_of(int cpu)
-{
-    char path[128];
-    int a = -1, b = -1;
-    FILE *fp;
+#define BUFFER_SIZE (sizeof(afl_input_t))
 
-    snprintf(path, sizeof(path),
-             "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
-    fp = fopen(path, "r");
-    if (!fp) {
-        perror(path);
-        return -1;
+void afl_set_params(const uint64_t *data, const uint64_t data_len)
+{
+    if (data_len < (BUFFER_SIZE)) {
+        printf("input is too short: %lu\n", data_len);
+        abort();
     }
-    if (fscanf(fp, "%d%*[-,]%d", &a, &b) < 2)  /* "2,8" or "2-3" or "2" */
-        b = -1;
-    fclose(fp);
-    return (a == cpu) ? b : a;
+
+    memcpy(&afl_input, data, BUFFER_SIZE);
+
+    afl_input.loops_waiting_line1 = afl_input.loops_waiting_line1 % (1024) + 1;
+    afl_input.num_messages = afl_input.num_messages % (1024 * 1024);
+    if (afl_input.num_messages > 1024*1024) {
+        abort();
+    }
+    afl_input.thread_start = afl_input.thread_start & 0x1;
+    afl_input.num_mes_power2 = (afl_input.num_mes_power2 % 8) + 1;
 }
 
-void usage(const char *prog)
+int main(void)
 {
-    printf("Usage: %s <placement>\n"
-           "  --cores      producer and consumer on two distinct physical cores\n"
-           "  --siblings   producer and consumer on HT siblings of one physical core\n"
-           "  --same-core  producer and consumer on one logical CPU\n"
-           "  --help       this text\n", prog);
-}
-
-int main(int argc, char **argv)
-{
-    if (argc != 2 || 0 == strcmp(argv[1], "--help")) {
-        usage(argv[0]);
-        return (argc == 2) ? EXIT_SUCCESS : EXIT_FAILURE;
-    }
-
-    /* Read CPU core states; cpu_cons becomes the most idle CPU */
-    find_two_least_busy_cores();
-
-    if (0 == strcmp(argv[1], "--same-core")) {
-        cpu_prod = cpu_cons;
-    } else if (0 == strcmp(argv[1], "--siblings")) {
-        cpu_prod = sibling_of(cpu_cons);
-        if (cpu_prod < 0) {
-            fprintf(stderr, "CPU %d has no HT sibling\n", cpu_cons);
-            return EXIT_FAILURE;
-        }
-    } else if (0 == strcmp(argv[1], "--cores")) {
-        /* The least-busy pair may be HT siblings: force distinct physical cores */
-        int sib = sibling_of(cpu_cons);
-        if (cpu_prod == cpu_cons || cpu_prod == sib) {
-            int n = sysconf(_SC_NPROCESSORS_ONLN);
-            for (int i = 0; i < n; i++) {
-                if (i != cpu_cons && i != sib) {
-                    cpu_prod = i;
-                    break;
-                }
-            }
-        }
-    } else {
-        usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    printf("Placement %s: producer CPU %d, consumer CPU %d\n",
-           argv[1], cpu_prod, cpu_cons);
-    printf("Array size: %ld\n", arr_size);
-
     /* Just for nice printing */
     setlocale(LC_ALL, "");
 
-    /* Init the Ring Buffer strcuture + array. We want "arr_size" members, but not more than 1Mb allocation */
-    ring_buf = rb_alloc_init(arr_size, 1024*1024);
+#ifdef __AFL_HAVE_MANUAL_CONTROL
+    __AFL_INIT();
+#endif
 
-    /* Oops, could not allocate. Cry and die. */
-    if (NULL == ring_buf) {
-        fprintf(stderr, "Failed to initialize ring_buf.\n");
-        return EXIT_FAILURE;
-    }
+    uint64_t buffer[BUFFER_SIZE];
 
-    pthread_t prod_thread, cons_thread;
+    while (__AFL_LOOP(1000)) {
 
-    /* Start producer and consumer threads */
-    pthread_create(&prod_thread, NULL, producer, NULL);
-    pthread_create(&cons_thread, NULL, consumer, NULL);
+        printf("Start loop\n");
 
-    /* Wait for both threads to complete */
-    pthread_join(prod_thread, NULL);
-    pthread_join(cons_thread, NULL);
+        pthread_t prod_thread, cons_thread;
 
-    /* Release the Ring Buffer */
-    rb_destroy(ring_buf);
+        size_t data_len = fread(buffer, 1, BUFFER_SIZE, stdin);
+
+        if (data_len < (BUFFER_SIZE - 1)) {
+            printf("Input too short\n");
+            continue;
+        }
+
+        afl_set_params(buffer, data_len);
+
+
+        /* Init the Ring Buffer strcuture + array. We want "arr_size" members, but not more than 1Mb allocation */
+        ring_buf = rb_alloc_init_power_2(afl_input.num_mes_power2, 1024*16);
+
+        /* Oops, could not allocate. Cry and die. */
+        if (NULL == ring_buf) {
+            fprintf(stderr, "Failed to initialize ring_buf.\n");
+            abort();
+        }
+
+        /* Read CPU core states, find two least busy to run the testing threads on them */
+        // find_two_least_busy_cores();
+
+
+        /* Start producer and consumer threads */
+        if (afl_input.thread_start) {
+            pthread_create(&prod_thread, NULL, producer, NULL);
+            pthread_create(&cons_thread, NULL, consumer, NULL);
+        } else {
+            pthread_create(&cons_thread, NULL, consumer, NULL);
+            pthread_create(&prod_thread, NULL, producer, NULL);
+        }
+
+        /* Wait for both threads to complete */
+        pthread_join(prod_thread, NULL);
+        pthread_join(cons_thread, NULL);
+
+        if (mes_pushed != mes_pulled) {
+            printf("Messages: Pushed (%lu) != Pulled (%lu)\n", mes_pushed, mes_pulled);
+            abort();
+        }
+
+        if (mes_pushed < 1) {
+            printf("Messages: Pushed (%lu), Pulled (%lu) < 1\n", mes_pushed, mes_pulled);
+            abort();
+        }
+
+        /* Release the Ring Buffer */
+        rb_destroy(ring_buf);
+
+        printf("Done loop\n");
+    } // while (__AFL_LOOP(10000))
     return EXIT_SUCCESS;
 }
 

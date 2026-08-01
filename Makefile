@@ -3,14 +3,15 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer
 
 TARGET = ring_buf_test.out
+PING = ring_buf_ping_pong.out
 LIBNAME = ringbuf.a
 ARCHIVE = lib$(LIBNAME)
-LIBS=-pthread
+LIBS=-pthread -lm
 SRCS = ring_buf_test_int.c
 OBJS = $(SRCS:.c=.o)
 RING_BUF_OBJ = ring_buf.o
 
-all: $(ARCHIVE) $(TARGET)
+all: $(ARCHIVE) $(TARGET) $(PING)
 
 # Step 1: Compile ring_buf.c into an object file
 $(RING_BUF_OBJ): ring_buf.c ring_buf.h
@@ -24,10 +25,14 @@ $(ARCHIVE): $(RING_BUF_OBJ)
 $(TARGET): $(OBJS) $(ARCHIVE)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS) $(ARCHIVE) $(LIBS)
 
+# Ping-pong latency test
+$(PING): ring_buf_ping_pong.o $(ARCHIVE)
+	$(CC) $(CFLAGS) -o $(PING) ring_buf_ping_pong.o $(ARCHIVE) $(LIBS)
+
 # Rule for compiling object files
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Clean up generated files
 clean:
-	rm -f $(TARGET) $(OBJS) $(RING_BUF_OBJ) $(ARCHIVE)
+	rm -f $(TARGET) $(PING) $(OBJS) ring_buf_ping_pong.o $(RING_BUF_OBJ) $(ARCHIVE)
