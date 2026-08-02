@@ -1,0 +1,20 @@
+CC = afl-clang-fast
+CFLAGS = -Wall -Wextra -std=c11 -O3 -ggdb -march=native -funroll-loops -fomit-frame-pointer
+LIBS = -pthread
+
+# Two harness binaries: default line-format ring and the indexed variant.
+# ring_buf.c is compiled directly into each so both get AFL instrumentation.
+TARGET = ring_buf_afl.out
+TARGET_IDX = ring_buf_afl_idx.out
+SRCS = ring_buf_afl2.c ring_buf.c ring_buf.h
+
+all: $(TARGET) $(TARGET_IDX)
+
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) -o $(TARGET) ring_buf_afl2.c ring_buf.c $(LIBS)
+
+$(TARGET_IDX): $(SRCS)
+	$(CC) $(CFLAGS) -DRB_INT_INDEXED -o $(TARGET_IDX) ring_buf_afl2.c ring_buf.c $(LIBS)
+
+clean:
+	rm -f $(TARGET) $(TARGET_IDX)
