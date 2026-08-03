@@ -72,7 +72,8 @@ typedef struct {
             uint64_t off;            /**< Offset in line, 0..6 */
         } p;
     };
-    uint8_t  _pad1[RB_SEC - 2 * sizeof(uint64_t)];
+    uint64_t est[4];                 /**< rb_batch_size() estimator state */
+    uint8_t  _pad1[RB_SEC - 6 * sizeof(uint64_t)];
 
     /* section 2 @256: written by the consumer ONLY */
     union {
@@ -159,5 +160,34 @@ int rb_push_int(ring_buf_t *d, int64_t idata);
  */
 __attribute__((hot))
 int rb_pull_int(ring_buf_t *d, int64_t *idata);
+
+/**
+ * @brief Push up to n values as one batch; never waits, never defers
+ * Default build publishes once per 64B line, -DRB_INT_INDEXED once per call.
+ * @param ring_buf_t* d      Ring Buffer (created with rb_alloc_init)
+ * @param const int64_t* msgs Values to push
+ * @param size_t n           How many
+ * @return int Number pushed (0 if full), RB_PARAM_ERROR on invalid input
+ */
+int rb_push_int_burst(ring_buf_t *d, const int64_t *msgs, size_t n);
+
+/**
+ * @brief Pull up to n already-published values; never waits
+ * @param ring_buf_t* d    Ring Buffer (created with rb_alloc_init)
+ * @param int64_t* msgs    Out: pulled values
+ * @param size_t n         Capacity of msgs
+ * @return int Number pulled (0 if empty), RB_PARAM_ERROR on invalid input
+ */
+int rb_pull_int_burst(ring_buf_t *d, int64_t *msgs, size_t n);
+
+/**
+ * @brief Producer-side adaptive batch size from the producer's own rate
+ * Call once per message from the producer thread; collect that many messages
+ * before rb_push_int_burst().  Degenerates to 1 at low rates (publish
+ * immediately); never accumulate beyond what the source already has.
+ * @param ring_buf_t* d    Ring Buffer (created with rb_alloc_init)
+ * @return uint32_t Recommended batch size, >= 1
+ */
+uint32_t rb_batch_size(ring_buf_t *d);
 
 #endif // DISRUPTOR_H
