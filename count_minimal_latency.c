@@ -30,6 +30,10 @@
 
 #define TOTAL       50000000ull  /* values the producer writes */
 #define STAMP_EVERY 1000ull      /* every n-th value carries a timestamp */
+#define STAMP_HOLD  64           /* repeat a stamped store: consecutive
+                                  * same-address stores coalesce in the store
+                                  * buffer, so an un-held stamp may never
+                                  * become globally visible at all */
 #define SEQ_BITS    20
 #define SEQ_MASK    ((1ull << SEQ_BITS) - 1)
 #define TS_MASK     ((1ull << 44) - 1)
@@ -44,7 +48,7 @@ static _Alignas(64) volatile uint64_t word;
 
 static uint64_t stamps_sent;
 static uint64_t seen_values, caught_stamps;
-static uint32_t delta_ns[MAX_SAMPLES];
+static int32_t delta_ns[MAX_SAMPLES];  /* signed: negative = clock skew */
 static long deltas;
 
 static inline uint64_t now_ns(void)
@@ -93,8 +97,15 @@ static void *producer(__attribute__((unused)) void *arg)
         if (0 == i % STAMP_EVERY) {
             w |= (now_ns() & TS_MASK) << SEQ_BITS;
             stamps_sent++;
+            /* Hold the stamp visible: without this the very next store may
+             * coalesce over it before it ever leaves the store buffer.  The
+             * consumer counts it once (first observation), so the hold does
+             * not bias the measured delta. */
+            for (int h = 0; h < STAMP_HOLD; h++)
+                word = w;
+        } else {
+            word = w;  /* plain volatile store: one MOV, no synchronization */
         }
-        word = w;  /* plain volatile store: one MOV, no synchronization */
     }
     word = FIN;
     return NULL;
@@ -120,18 +131,22 @@ static void *consumer(__attribute__((unused)) void *arg)
 
         if (ts) {  /* a stamped value we managed to catch */
             uint64_t d = ((now_ns() & TS_MASK) - ts) & TS_MASK;
+            /* mod-2^44 result -> signed: a small negative delta means the
+             * consumer's clock runs behind the producer's (cross-CPU skew) */
+            int64_t sd = (d > TS_MASK / 2) ? (int64_t)d - (int64_t)(TS_MASK + 1)
+                                           : (int64_t)d;
 
             caught_stamps++;
-            if (d < WINDOW_NS && deltas < MAX_SAMPLES)
-                delta_ns[deltas++] = (uint32_t)d;
+            if (sd > -1000 && sd < (int64_t)WINDOW_NS && deltas < MAX_SAMPLES)
+                delta_ns[deltas++] = (int32_t)sd;
         }
     }
     return NULL;
 }
 
-static int cmp_u32(const void *a, const void *b)
+static int cmp_i32(const void *a, const void *b)
 {
-    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    int32_t x = *(const int32_t *)a, y = *(const int32_t *)b;
 
     return (x > y) - (x < y);
 }
@@ -183,11 +198,16 @@ int main(int argc, char **argv)
         perror("pthread_join");
 
     if (0 == deltas) {
-        fprintf(stderr, "no stamped values caught\n");
+        fprintf(stderr, "no usable samples: %llu values observed, %llu stamps "
+                "sent, %llu stamps caught (0 caught = stamps never became "
+                "visible; caught but 0 usable = clock skew beyond limits)\n",
+                (unsigned long long)seen_values,
+                (unsigned long long)stamps_sent,
+                (unsigned long long)caught_stamps);
         return EXIT_FAILURE;
     }
 
-    qsort(delta_ns, deltas, sizeof(*delta_ns), cmp_u32);
+    qsort(delta_ns, deltas, sizeof(*delta_ns), cmp_i32);
 
     double mean = 0.0, var = 0.0;
     for (long i = 0; i < deltas; i++)
@@ -203,7 +223,7 @@ int main(int argc, char **argv)
            (unsigned long long)stamps_sent,
            (unsigned long long)caught_stamps, deltas);
     printf("clock read cost: %.1f ns\n", timer_ns);
-    printf("one-way ns (raw):       min %u  p50 %u  p99 %u  max %u  "
+    printf("one-way ns (raw):       min %d  p50 %d  p99 %d  max %d  "
            "mean %.1f  stddev %.1f\n",
            delta_ns[0], delta_ns[deltas / 2], delta_ns[deltas / 100 * 99],
            delta_ns[deltas - 1], mean, sqrt(var));

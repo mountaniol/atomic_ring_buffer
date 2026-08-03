@@ -57,9 +57,11 @@ typedef struct {
     uint8_t  c_delay[4];    /* consumer busy-delay per phase, 0..31 spins */
 } afl_input_t;
 
-static afl_input_t in;
+static afl_input_t in, raw;  /* raw = pre-clamp copy: entropy for contracts */
 static ring_buf_t *rb;
 static uint64_t pushed, pulled;
+
+#define MAX_ALLOC ((size_t)1 << 20)
 
 /* Session control: main release-bumps go_seq to start both workers; each
  * worker release-increments done_cnt when its role is finished. */
@@ -197,6 +199,97 @@ static void consume(void)
     }
 }
 
+/* Mirror of the library's allocation-size formula, for exact expectations */
+static size_t expected_total(uint32_t pow2, uint32_t mode)
+{
+    size_t cells = (size_t)1 << pow2;
+#ifdef RB_INT_INDEXED
+    size_t bytes = mode ? cells * sizeof(cell_t) : cells * sizeof(int64_t);
+#else
+    size_t bytes = mode ? cells * sizeof(cell_t)
+                        : (cells / 8 ? cells / 8 : 1) * 64;
+#endif
+    return (384 + bytes + 127) & ~(size_t)127;
+}
+
+#define CONTRACT(cond) do { \
+    if (!(cond)) { fprintf(stderr, "contract failed: %s\n", #cond); abort(); } \
+} while (0)
+
+/* Exercise every argument-validation path with fuzz-varied values; a wrong
+ * return code is a bug and aborts.  Called once per iteration. */
+static void contract_phase(void)
+{
+    int64_t v;
+    void *p;
+    size_t sz;
+
+    /* NULL-ring contracts */
+    CONTRACT(rb_push_int(NULL, 1) == RB_PARAM_ERROR);
+    CONTRACT(rb_pull_int(NULL, &v) == RB_PARAM_ERROR);
+    CONTRACT(rb_push_ptr(NULL, &v, 1) == RB_PARAM_ERROR);
+    p = NULL;
+    sz = 0;
+    CONTRACT(rb_pull_ptr(NULL, &p, &sz) == RB_PARAM_ERROR);
+
+    /* Not-a-power-of-two and zero cells are rejected by both constructors */
+    size_t np = raw.phase_len % 65536;
+    if (np < 3)
+        np = 3;
+    while (0 == (np & (np - 1)))
+        np += 3;
+    CONTRACT(rb_alloc_init(np, MAX_ALLOC) == NULL);
+    CONTRACT(rb_alloc_init_ptr(np, MAX_ALLOC) == NULL);
+    CONTRACT(rb_alloc_init(0, MAX_ALLOC) == NULL);
+    CONTRACT(rb_alloc_init_ptr(0, MAX_ALLOC) == NULL);
+
+    /* Size-multiplication overflow guard */
+    uint32_t bigp = 58 + raw.spin_limit % 6;  /* 2^58 .. 2^63 cells */
+    CONTRACT(rb_alloc_init((size_t)1 << bigp, SIZE_MAX) == NULL);
+    CONTRACT(rb_alloc_init_ptr((size_t)1 << bigp, SIZE_MAX) == NULL);
+
+    /* max_alloc_size boundary: limit = size-1 rejects, limit = size accepts */
+    uint32_t bp = raw.num_messages % 10 + 1;
+    uint32_t bmode = raw.start_order >> 1 & 1;
+    size_t need = expected_total(bp, bmode);
+    ring_buf_t *b;
+
+    b = bmode ? rb_alloc_init_ptr((size_t)1 << bp, need - 1)
+              : rb_alloc_init((size_t)1 << bp, need - 1);
+    CONTRACT(NULL == b);
+    b = bmode ? rb_alloc_init_ptr((size_t)1 << bp, need)
+              : rb_alloc_init((size_t)1 << bp, need);
+    CONTRACT(NULL != b);
+    rb_destroy(b);
+}
+
+/* Contracts that need a live ring of the session's mode */
+static void contract_phase_rb(void)
+{
+    int64_t v;
+    void *p;
+    size_t sz;
+
+    if (in.mode) {
+        /* oversized size is rejected before anything is written */
+        CONTRACT(rb_push_ptr(rb, &v, (size_t)INT32_MAX + 1 + raw.cells_pow2)
+                 == RB_PARAM_ERROR);
+        /* NULL and dirty out-parameters, each || branch separately */
+        sz = 0;
+        CONTRACT(rb_pull_ptr(rb, NULL, &sz) == RB_PARAM_ERROR);
+        p = NULL;
+        CONTRACT(rb_pull_ptr(rb, &p, NULL) == RB_PARAM_ERROR);
+        p = &v;
+        sz = 0;
+        CONTRACT(rb_pull_ptr(rb, &p, &sz) == RB_PARAM_ERROR);
+        p = NULL;
+        sz = 1 + raw.spin_limit % 100;
+        CONTRACT(rb_pull_ptr(rb, &p, &sz) == RB_PARAM_ERROR);
+    } else {
+        CONTRACT(rb_pull_int(rb, NULL) == RB_PARAM_ERROR);
+    }
+}
+
 /* Persistent worker: parks on the spin barrier between sessions */
 static void *worker_fn(void *arg)
 {
@@ -243,10 +336,11 @@ int main(void)
     while (__AFL_LOOP(10000)) {
         if ((size_t)__AFL_FUZZ_TESTCASE_LEN < sizeof(afl_input_t))
             continue;
-        memcpy(&in, buf, sizeof(in));
+        memcpy(&raw, buf, sizeof(raw));
+        in = raw;
 
-        in.num_messages = in.num_messages % 2048 + 1;
-        in.cells_pow2 = in.cells_pow2 % 12 + 1;
+        in.num_messages = in.num_messages % 2048;      /* 0 is a scenario too */
+        in.cells_pow2 = in.cells_pow2 % 16 + 1;        /* 2 .. 65536 cells */
         in.spin_limit = in.spin_limit % 1024 + 1;
         in.start_order &= 1;
         in.mode &= 1;
@@ -256,12 +350,22 @@ int main(void)
             in.c_delay[i] &= 31;
         }
 
-        rb = in.mode ? rb_alloc_init_ptr((size_t)1 << in.cells_pow2, 1 << 20)
-                     : rb_alloc_init((size_t)1 << in.cells_pow2, 1 << 20);
-        if (NULL == rb) {
-            fprintf(stderr, "alloc failed, pow2 %u\n", in.cells_pow2);
+        contract_phase();
+
+        /* Large ptr rings exceed MAX_ALLOC: rejection is the expected result */
+        int expect_null = expected_total(in.cells_pow2, in.mode) > MAX_ALLOC;
+
+        rb = in.mode ? rb_alloc_init_ptr((size_t)1 << in.cells_pow2, MAX_ALLOC)
+                     : rb_alloc_init((size_t)1 << in.cells_pow2, MAX_ALLOC);
+        if ((NULL == rb) != expect_null) {
+            fprintf(stderr, "alloc expectation broken, pow2 %u mode %u\n",
+                    in.cells_pow2, in.mode);
             abort();
         }
+        if (NULL == rb)
+            continue;  /* rejection scenario: no session to run */
+
+        contract_phase_rb();
         pushed = pulled = 0;
 
         /* Run the session on the persistent workers */
