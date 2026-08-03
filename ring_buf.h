@@ -21,7 +21,9 @@ enum {
     RB_EMPTY = -2,          /**< Buffer is empty */
     RB_ERROR = -3,          /**< Generic error */
     RB_PARAM_ERROR = -4,    /**< Invalid parameter */
-    RB_MEMORY_FAIL = -5     /**< Memory allocation failure */
+    RB_MEMORY_FAIL = -5,    /**< Memory allocation failure */
+    RB_TIMEOUT = -6,        /**< rb_*_wait: timeout expired */
+    RB_CLOSED = -7          /**< rb_*_wait: ring was closed by rb_wake() */
 };
 
 /** One record of a ptr+size ring: 16 bytes, 4 per cache line */
@@ -72,8 +74,12 @@ typedef struct {
             uint64_t off;            /**< Offset in line, 0..6 */
         } p;
     };
+    /* est[] lives in the SECOND 64B line of the producer section: it is
+     * written on every rb_batch_size() call, and the first line (tail) is
+     * acquire-polled by the consumer - sharing it would ping-pong per call */
+    uint8_t  _pad1a[64 - 2 * sizeof(uint64_t)];
     uint64_t est[4];                 /**< rb_batch_size() estimator state */
-    uint8_t  _pad1[RB_SEC - 6 * sizeof(uint64_t)];
+    uint8_t  _pad1b[64 - 4 * sizeof(uint64_t)];
 
     /* section 2 @256: written by the consumer ONLY */
     union {
@@ -86,15 +92,29 @@ typedef struct {
             uint64_t off;            /**< Offset in line, 0..6 */
         } c;
     };
-    uint8_t  _pad2[RB_SEC - 2 * sizeof(uint64_t)];
+    uint8_t  _pad2a[64 - 2 * sizeof(uint64_t)];
+
+    /* Parking state (rb_*_wait/rb_wake) on its own quiet line: touched only
+     * around sleep/wake events, by BOTH sides (RMW protocol) - deliberate
+     * exception to the section ownership rule, never on a hot-path line.
+     * Doors are futex words: 32-bit, 4-byte aligned. */
+    _Atomic uint32_t csleep;         /**< consumer parked flag */
+    _Atomic uint32_t cdoor;          /**< consumer wake generation (futex) */
+    _Atomic uint32_t psleep;         /**< producer parked flag */
+    _Atomic uint32_t pdoor;          /**< producer wake generation (futex) */
+    _Atomic uint32_t closed;         /**< rb_wake() called; one-way */
+    uint8_t  _pad2b[64 - 5 * sizeof(uint32_t)];
 
     unsigned char data[];     /**< Cells @384; layout depends on ring mode */
 } ring_buf_t;
 
 _Static_assert(offsetof(ring_buf_t, tail) == 128, "producer section @128");
+_Static_assert(offsetof(ring_buf_t, est) == 192, "estimator on own line");
 _Static_assert(offsetof(ring_buf_t, head) == 256, "consumer section @256");
+_Static_assert(offsetof(ring_buf_t, csleep) == 320, "parking on own line");
 _Static_assert(offsetof(ring_buf_t, data) == 384, "data section @384");
 _Static_assert(sizeof(_Atomic uint64_t) == sizeof(uint64_t), "shm ABI");
+_Static_assert(sizeof(_Atomic uint32_t) == 4, "futex word ABI");
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
                "shm needs address-free lock-free 64-bit atomics");
 
@@ -189,5 +209,39 @@ int rb_pull_int_burst(ring_buf_t *d, int64_t *msgs, size_t n);
  * @return uint32_t Recommended batch size, >= 1
  */
 uint32_t rb_batch_size(ring_buf_t *d);
+
+/*
+ * Optional blocking (Linux futex).  Contract: a side may sleep ONLY if the
+ * opposite side also uses the _wait functions - they carry the wakeups; the
+ * non-blocking API stays wakeup-free and untouched.  Spins ~RB_WAIT_SPIN
+ * pause-iterations before parking (wake-from-sleep costs ~3-40 us depending
+ * on C-states; see study notes).
+ */
+
+/**
+ * @brief Push one value; sleep while the ring is full
+ * @param ring_buf_t* d      Ring Buffer (created with rb_alloc_init)
+ * @param int64_t idata      Value to save
+ * @param uint64_t timeout_ns Max wait; 0 = wait forever
+ * @return int RB_OK, RB_TIMEOUT, RB_CLOSED, RB_PARAM_ERROR
+ */
+int rb_push_wait(ring_buf_t *d, int64_t idata, uint64_t timeout_ns);
+
+/**
+ * @brief Pull one value; sleep while the ring is empty
+ * @param ring_buf_t* d      Ring Buffer (created with rb_alloc_init)
+ * @param int64_t* idata     Out: extracted value
+ * @param uint64_t timeout_ns Max wait; 0 = wait forever
+ * @return int RB_OK, RB_TIMEOUT, RB_CLOSED, RB_PARAM_ERROR
+ */
+int rb_pull_wait(ring_buf_t *d, int64_t *idata, uint64_t timeout_ns);
+
+/**
+ * @brief Close the ring for waiters: both sleeping sides wake and return
+ *        RB_CLOSED, as do all future _wait calls that would block.
+ *        Data already in the ring stays readable.  One-way.
+ * @param ring_buf_t* d      Ring Buffer
+ */
+void rb_wake(ring_buf_t *d);
 
 #endif // DISRUPTOR_H

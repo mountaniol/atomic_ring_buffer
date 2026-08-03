@@ -14,7 +14,8 @@
 
 /* This variable is used in helper functions fo_push() / do_pull() "*/
 const int loops_waiting = 10000;
-#define NUM_MESSAGES 500000000
+long num_messages = 500 * 1000000L;  /* millions; overridden by --samples */
+int use_wait = 0;                    /* --wait: rb_push_wait/rb_pull_wait */
 size_t arr_size = 4096 * 2;
 
 /* Latency sampling: every LAT_SAMPLE-th message is timestamped by the
@@ -167,22 +168,37 @@ void *producer(__attribute__((unused))void *arg)
 {
     set_my_cpu(cpu_prod);
     set_my_prio();
+
+    /* Local copies: keep the hot loop free of global reloads (perf: the
+     * ring_buf global was re-loaded + NULL-tested on every message) */
+    const long n = num_messages;
+    const int w = use_wait;
+    ring_buf_t *const rb = ring_buf;
     uint64_t start_ns = get_time_ns(); // Start time
 
-
-    for (int64_t i = 0; i < NUM_MESSAGES; i++) {
-        if (0 == (i & (LAT_SAMPLE - 1)))
-            lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
-        do_push(ring_buf, i);
+    /* Separate loops: the busy loop must stay as tiny as the original -
+     * on HT siblings both threads share the uop cache and L1I */
+    if (w) {
+        for (int64_t i = 0; i < n; i++) {
+            if (0 == (i & (LAT_SAMPLE - 1)))
+                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
+            rb_push_wait(rb, i, 0);
+        }
+    } else {
+        for (int64_t i = 0; i < n; i++) {
+            if (0 == (i & (LAT_SAMPLE - 1)))
+                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
+            do_push(rb, i);
+        }
     }
 
     uint64_t end_ns = get_time_ns(); // End time
 
     double elapsed_sec = (end_ns - start_ns) / 1e9;
-    double throughput = NUM_MESSAGES / elapsed_sec;
+    double throughput = num_messages / elapsed_sec;
     printf("Producer finished in %.6f seconds, misses: %d\n", (end_ns - start_ns) / 1e9, miss_push);
     printf("Throughput: %'f messages/sec\n", throughput);
-    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / NUM_MESSAGES);
+    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / num_messages);
 
     return NULL;
 }
@@ -203,36 +219,65 @@ void *consumer(__attribute__((unused))void *arg)
     double lat_sum = 0, lat_sum2 = 0, lat_min = 1e18, lat_max = 0;
     long lat_n = 0;
 
+    /* Local copies: keep the hot loop free of global reloads (perf: the
+     * ring_buf global was re-loaded + NULL-tested on every message) */
+    const long n = num_messages;
+    const int w = use_wait;
+    ring_buf_t *const rb = ring_buf;
     uint64_t start_ns = get_time_ns(); // Start time
 
-    for (long i = 0; i < NUM_MESSAGES; i++) {
-        int64_t idata;
+    /* Separate loops: keep the busy loop as tiny as the original */
+    if (w) {
+        for (long i = 0; i < n; i++) {
+            int64_t idata = -1;
 
-        do_pull(ring_buf, &idata);
+            rb_pull_wait(rb, &idata, 0);
 
-        if (idata != i) {
-            printf("Expected payload %ld but it is %ld\n", i, idata);
-            abort();
+            if (idata != i) {
+                printf("Expected payload %ld but it is %ld\n", i, idata);
+                abort();
+            }
+
+            if (0 == (i & (LAT_SAMPLE - 1))) {
+                double d = (double)(get_time_ns() -
+                                    lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                lat_n++;
+                lat_sum += d;
+                lat_sum2 += d * d;
+                if (d < lat_min) lat_min = d;
+                if (d > lat_max) lat_max = d;
+            }
         }
+    } else {
+        for (long i = 0; i < n; i++) {
+            int64_t idata = -1;
 
-        if (0 == (i & (LAT_SAMPLE - 1))) {
-            double d = (double)(get_time_ns() -
-                                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
-            lat_n++;
-            lat_sum += d;
-            lat_sum2 += d * d;
-            if (d < lat_min) lat_min = d;
-            if (d > lat_max) lat_max = d;
+            do_pull(rb, &idata);
+
+            if (idata != i) {
+                printf("Expected payload %ld but it is %ld\n", i, idata);
+                abort();
+            }
+
+            if (0 == (i & (LAT_SAMPLE - 1))) {
+                double d = (double)(get_time_ns() -
+                                    lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                lat_n++;
+                lat_sum += d;
+                lat_sum2 += d * d;
+                if (d < lat_min) lat_min = d;
+                if (d > lat_max) lat_max = d;
+            }
         }
     }
 
     uint64_t end_ns = get_time_ns(); // End time
     double elapsed_sec = (end_ns - start_ns) / 1e9;
-    double throughput = NUM_MESSAGES / elapsed_sec;
+    double throughput = num_messages / elapsed_sec;
 
     printf("Consumer finished in %.6f seconds, missses: %d\n", elapsed_sec, miss_pull);
     printf("Throughput: %'f messages/sec\n", throughput);
-    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / NUM_MESSAGES);
+    printf("Per message: %.3f ns\n", (double)(end_ns - start_ns) / num_messages);
 
     double lat_mean = lat_sum / lat_n;
     printf("Latency (every %dth msg, %ld samples): min %.0f ns, mean %.0f ns, "
@@ -368,32 +413,63 @@ int sibling_of(int cpu)
 
 void usage(const char *prog)
 {
-    printf("Usage: %s <placement>\n"
+    printf("Usage: %s <placement> [options]\n"
            "  --cores      producer and consumer on two distinct physical cores\n"
            "  --siblings   producer and consumer on HT siblings of one physical core\n"
            "  --same-core  producer and consumer on one logical CPU\n"
+           "  --wait       use blocking rb_push_wait/rb_pull_wait (futex)\n"
+           "  --samples N[mM]  messages to run, in millions (default 500m)\n"
            "  --help       this text\n", prog);
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 2 || 0 == strcmp(argv[1], "--help")) {
+    const char *placement = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (0 == strcmp(argv[i], "--help")) {
+            usage(argv[0]);
+            return EXIT_SUCCESS;
+        } else if (0 == strcmp(argv[i], "--wait")) {
+            use_wait = 1;
+        } else if (0 == strcmp(argv[i], "--samples")) {
+            char *end;
+            long v;
+            if (++i >= argc) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            v = strtol(argv[i], &end, 10);
+            if (v <= 0 ||
+                (*end != '\0' && strcmp(end, "m") && strcmp(end, "M"))) {
+                fprintf(stderr, "Bad --samples value: %s\n", argv[i]);
+                return EXIT_FAILURE;
+            }
+            num_messages = v * 1000000L;
+        } else if (NULL == placement) {
+            placement = argv[i];
+        } else {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+    if (NULL == placement) {
         usage(argv[0]);
-        return (argc == 2) ? EXIT_SUCCESS : EXIT_FAILURE;
+        return EXIT_FAILURE;
     }
 
     /* Read CPU core states; cpu_cons becomes the most idle CPU */
     find_two_least_busy_cores();
 
-    if (0 == strcmp(argv[1], "--same-core")) {
+    if (0 == strcmp(placement, "--same-core")) {
         cpu_prod = cpu_cons;
-    } else if (0 == strcmp(argv[1], "--siblings")) {
+    } else if (0 == strcmp(placement, "--siblings")) {
         cpu_prod = sibling_of(cpu_cons);
         if (cpu_prod < 0) {
             fprintf(stderr, "CPU %d has no HT sibling\n", cpu_cons);
             return EXIT_FAILURE;
         }
-    } else if (0 == strcmp(argv[1], "--cores")) {
+    } else if (0 == strcmp(placement, "--cores")) {
         /* The least-busy pair may be HT siblings: force distinct physical cores */
         int sib = sibling_of(cpu_cons);
         if (cpu_prod == cpu_cons || cpu_prod == sib) {
@@ -411,8 +487,10 @@ int main(int argc, char **argv)
     }
 
     printf("Placement %s: producer CPU %d, consumer CPU %d\n",
-           argv[1], cpu_prod, cpu_cons);
+           placement, cpu_prod, cpu_cons);
     printf("Array size: %ld\n", arr_size);
+    printf("Samples: %ldm%s\n", num_messages / 1000000L,
+           use_wait ? ", mode: wait (futex)" : "");
 
     /* Just for nice printing */
     setlocale(LC_ALL, "");
