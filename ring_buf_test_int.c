@@ -21,15 +21,40 @@ int auto_batch = 0;                  /* --auto-batch: rb_batch_size() picks */
 #define BATCH_MAX 256                /* local batch buffer cap */
 size_t arr_size = 4096 * 2;
 
-/* Latency sampling: every LAT_SAMPLE-th message is timestamped by the
+/* Latency sampling: every LAT_STRIDE-th message is timestamped by the
  * producer into lat_sent_ns[] BEFORE the push; the consumer reads the slot
  * AFTER pulling that message, so the ring's own release/acquire publication
- * orders the accesses - no extra synchronization needed.  Slot count covers
- * far more in-flight samples than the ring can hold (8192/1024 = 8). */
-#define LAT_SAMPLE 1024
+ * orders the accesses - no extra synchronization needed.  The stride is
+ * PRIME: a power-of-two stride divides both the batch size and the ring
+ * capacity, so it only ever samples in-batch position 0 and 7 of the 7168
+ * ring cells - 7 fixed phases of one ring lap.  Measured with a single
+ * binary taking the stride from the environment (identical code layout,
+ * 24 interleaved runs per group): that phase lock UNDER-REPORTS the mean
+ * latency by ~25% in batch modes, while throughput is unaffected.
+ * Max in-flight samples = (8192 + BATCH_MAX)/1021 + 1 = 9, far below the
+ * slot count. */
+#define LAT_STRIDE 1021
 #define LAT_SLOTS  64
 uint64_t lat_sent_ns[LAT_SLOTS];
 
+/* Latency histogram, HdrHistogram layout: LAT_SUB linear sub-buckets per
+ * octave starting at 2^LAT_EMIN ns, top bucket open-ended.  Only counting
+ * happens here - display bins and percentiles are computed by
+ * bench_matrix.py, so archived runs can be re-binned without re-measuring. */
+#define LAT_EMIN 4                                  /* first edge 16 ns */
+#define LAT_EMAX 24                                 /* last edge 16.8 ms */
+#define LAT_SUB  8                                  /* sub-buckets/octave */
+#define LAT_NB   ((LAT_EMAX - LAT_EMIN) * LAT_SUB)  /* 160 buckets */
+_Static_assert(8 == LAT_SUB, "the mantissa shift below assumes 3 bits");
+
+static inline unsigned lat_bucket(uint64_t ns)
+{
+    unsigned e;
+    if (ns < (1u << LAT_EMIN)) return 0;      /* also guards clzll(0) UB */
+    e = 63u - (unsigned)__builtin_clzll(ns);
+    if (e >= LAT_EMAX) return LAT_NB - 1;     /* open-ended top bucket */
+    return (e - LAT_EMIN) * LAT_SUB + (unsigned)((ns >> (e - 3)) & 7u);
+}
 
 /* What processor should it run? Notem these values will be replaced by find_two_least_busy_cores() */
 int cpu_prod = 0;
@@ -177,6 +202,8 @@ void *producer(__attribute__((unused))void *arg)
     const long n = num_messages;
     const int w = use_wait;
     ring_buf_t *const rb = ring_buf;
+    int64_t lat_next = 0;             /* index of the next sampled message */
+    uint32_t lat_slot = 0;            /* sample ordinal -> slot */
     uint64_t start_ns = get_time_ns(); // Start time
 
     /* Separate loops: the busy loop must stay as tiny as the original -
@@ -195,9 +222,11 @@ void *producer(__attribute__((unused))void *arg)
                 b = (uint32_t)(n - i);
             for (uint32_t t = 0; t < b; t++) {
                 int64_t v = i + t;
-                if (0 == (v & (LAT_SAMPLE - 1)))
-                    lat_sent_ns[(v / LAT_SAMPLE) & (LAT_SLOTS - 1)] =
-                        get_time_ns();
+                if (v == lat_next) {
+                    lat_sent_ns[lat_slot & (LAT_SLOTS - 1)] = get_time_ns();
+                    lat_slot++;
+                    lat_next += LAT_STRIDE;
+                }
                 bbuf[t] = v;
             }
             uint32_t done = 0;
@@ -215,14 +244,20 @@ void *producer(__attribute__((unused))void *arg)
         }
     } else if (w) {
         for (int64_t i = 0; i < n; i++) {
-            if (0 == (i & (LAT_SAMPLE - 1)))
-                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
+            if (i == lat_next) {
+                lat_sent_ns[lat_slot & (LAT_SLOTS - 1)] = get_time_ns();
+                lat_slot++;
+                lat_next += LAT_STRIDE;
+            }
             rb_push_wait(rb, i, 0);
         }
     } else {
         for (int64_t i = 0; i < n; i++) {
-            if (0 == (i & (LAT_SAMPLE - 1)))
-                lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
+            if (i == lat_next) {
+                lat_sent_ns[lat_slot & (LAT_SLOTS - 1)] = get_time_ns();
+                lat_slot++;
+                lat_next += LAT_STRIDE;
+            }
             do_push(rb, i);
         }
     }
@@ -253,6 +288,9 @@ void *consumer(__attribute__((unused))void *arg)
 
     double lat_sum = 0, lat_sum2 = 0, lat_min = 1e18, lat_max = 0;
     long lat_n = 0;
+    long lat_next = 0;                /* index of the next sampled message */
+    uint32_t lat_slot = 0;            /* sample ordinal -> slot */
+    uint32_t hist[LAT_NB] = {0};      /* u32: saturates past 4.3e9 samples */
 
     /* Local copies: keep the hot loop free of global reloads (perf: the
      * ring_buf global was re-loaded + NULL-tested on every message) */
@@ -284,14 +322,17 @@ void *consumer(__attribute__((unused))void *arg)
                            (long)out[t]);
                     abort();
                 }
-                if (0 == (i & (LAT_SAMPLE - 1))) {
+                if (i == lat_next) {
                     double d = (double)(get_time_ns() -
-                                        lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                                        lat_sent_ns[lat_slot & (LAT_SLOTS - 1)]);
+                    lat_slot++;
+                    lat_next += LAT_STRIDE;
                     lat_n++;
                     lat_sum += d;
                     lat_sum2 += d * d;
                     if (d < lat_min) lat_min = d;
                     if (d > lat_max) lat_max = d;
+                    hist[lat_bucket((uint64_t)d)]++;
                 }
             }
         }
@@ -306,14 +347,17 @@ void *consumer(__attribute__((unused))void *arg)
                 abort();
             }
 
-            if (0 == (i & (LAT_SAMPLE - 1))) {
+            if (i == lat_next) {
                 double d = (double)(get_time_ns() -
-                                    lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                                    lat_sent_ns[lat_slot & (LAT_SLOTS - 1)]);
+                lat_slot++;
+                lat_next += LAT_STRIDE;
                 lat_n++;
                 lat_sum += d;
                 lat_sum2 += d * d;
                 if (d < lat_min) lat_min = d;
                 if (d > lat_max) lat_max = d;
+                hist[lat_bucket((uint64_t)d)]++;
             }
         }
     } else {
@@ -327,14 +371,17 @@ void *consumer(__attribute__((unused))void *arg)
                 abort();
             }
 
-            if (0 == (i & (LAT_SAMPLE - 1))) {
+            if (i == lat_next) {
                 double d = (double)(get_time_ns() -
-                                    lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                                    lat_sent_ns[lat_slot & (LAT_SLOTS - 1)]);
+                lat_slot++;
+                lat_next += LAT_STRIDE;
                 lat_n++;
                 lat_sum += d;
                 lat_sum2 += d * d;
                 if (d < lat_min) lat_min = d;
                 if (d > lat_max) lat_max = d;
+                hist[lat_bucket((uint64_t)d)]++;
             }
         }
     }
@@ -349,8 +396,19 @@ void *consumer(__attribute__((unused))void *arg)
 
     double lat_mean = lat_sum / lat_n;
     printf("Latency (every %dth msg, %ld samples): min %.0f ns, mean %.0f ns, "
-           "max %.0f ns, stddev %.0f ns\n", LAT_SAMPLE, lat_n, lat_min,
+           "max %.0f ns, stddev %.0f ns\n", LAT_STRIDE, lat_n, lat_min,
            lat_mean, lat_max, sqrt(lat_sum2 / lat_n - lat_mean * lat_mean));
+
+    /* Non-empty buckets only, one buffer and one printf: the producer prints
+     * concurrently and only a single printf call is atomic against it */
+    char hb[2560];
+    int hp = snprintf(hb, sizeof(hb), "LatHist v1 emin=%d sub=%d nb=%d "
+                      "samples=%ld:", LAT_EMIN, LAT_SUB, LAT_NB, lat_n);
+    for (int b = 0; b < LAT_NB && hp > 0 && (size_t)hp < sizeof(hb); b++)
+        if (hist[b])
+            hp += snprintf(hb + hp, sizeof(hb) - (size_t)hp, " %d:%u",
+                           b, hist[b]);
+    printf("%s\n", hb);
     return NULL;
 }
 
