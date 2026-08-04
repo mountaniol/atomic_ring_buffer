@@ -9,7 +9,16 @@
  * Build variants: default and -DRB_INT_INDEXED. */
 #include <assert.h>
 #include <pthread.h>
-#include "ring_buf.c"
+/* GenMC accommodations, all verification-side (library untouched):
+ * - its libc stubs have no perror (failure-path printing is irrelevant);
+ * - its interpreter rejects the rdtsc intrinsic (rb_cycles is compiled
+ *   into the TU although this harness never calls rb_batch_size);
+ * - the include path is explicit: genmc resolves quote-includes
+ *   unreliably for files under tests/. */
+#define perror(s) ((void)(s))
+#define __builtin_ia32_rdtsc() 0
+#define __builtin_ia32_pause() ((void)0)
+#include "../ring_buf.c"
 
 #define N 3
 

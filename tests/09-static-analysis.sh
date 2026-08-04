@@ -2,9 +2,6 @@
 # DESC: gcc -fanalyzer over every .c file + curated clang-tidy and cppcheck over the library
 # EST_TIME: 1min
 # TIMEOUT: 600
-# KNOWN open defect that keeps this test red until decided (HARDENING.md
-# #11, defect 5): ring_buf.c INT_CELLS/PTR_CELLS/LINES casts -
-# bugprone-casting-through-void / strict-aliasing question.
 . "$(dirname "$0")/common.sh"
 
 step "gcc -fanalyzer: library, both variants (must be 0 findings)"
@@ -58,7 +55,7 @@ for var in "" "-DRB_INT_INDEXED"; do
     if [ "$n" -eq 0 ]; then
         ok "clang-tidy $tag"
     else
-        fail "clang-tidy $tag: $n findings [casting-through-void = KNOWN defect 5]"
+        fail "clang-tidy $tag: $n findings"
     fi
 done
 

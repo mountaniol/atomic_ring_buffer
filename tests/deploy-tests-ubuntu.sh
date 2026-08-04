@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# Installs everything the tests/ suite needs on Ubuntu (22.04/24.04).
-# Needs sudo for apt.  Idempotent: already-installed packages are skipped.
-#
-# Usage: ./deploy-tests-ubuntu.sh [--with-genmc]
-#   --with-genmc   additionally builds GenMC v0.16.1 from source into
-#                  ~/tools/genmc (needed only by test 16; slow, ~10 min)
+# Installs everything the tests/ suite needs on Ubuntu (22.04/24.04),
+# including a GenMC build from source (test 16; ~5-10 min).
+# Needs sudo for apt.  Idempotent: existing packages and builds are skipped.
 
 set -u
-
-WITH_GENMC=0
-[ "${1:-}" = "--with-genmc" ] && WITH_GENMC=1
 
 # Core toolchain + every analyzer/fuzzer the suite invokes
 PKGS=(
@@ -44,22 +38,21 @@ else
     echo "== all packages already installed"
 fi
 
-if [ "$WITH_GENMC" -eq 1 ]; then
-    echo "== building GenMC (v0.16.1: last release with IMM enabled)"
-    mkdir -p "$HOME/tools"
-    if [ -x "$HOME/tools/genmc/build/genmc" ]; then
-        echo "   already built: $HOME/tools/genmc/build/genmc"
-    else
-        git clone --branch v0.16.1 --depth 1 \
-            https://github.com/MPI-SWS/genmc "$HOME/tools/genmc" &&
-        cmake -S "$HOME/tools/genmc" -B "$HOME/tools/genmc/build" \
-              -DCMAKE_BUILD_TYPE=Release &&
-        make -C "$HOME/tools/genmc/build" -j"$(nproc)" ||
-        echo "WARN: GenMC build failed - test 16 will be skipped"
-    fi
-    if [ -x "$HOME/tools/genmc/build/genmc" ]; then
-        echo "   add to PATH: export PATH=\$HOME/tools/genmc/build:\$PATH"
-    fi
+# GenMC v0.17.0: builds against LLVM 15-20 (v0.16.x needs LLVM <= 15 and
+# does not compile on this toolchain).  CMAKE_PREFIX_PATH pins LLVM 18 -
+# GenMC's cmake otherwise grabs the oldest llvm-dev on the box (14).
+echo "== building GenMC v0.17.0 into ~/tools/genmc"
+mkdir -p "$HOME/tools"
+if [ -x "$HOME/tools/genmc/build/bin/genmc" ]; then
+    echo "   already built: $HOME/tools/genmc/build/bin/genmc"
+else
+    git clone --branch v0.17.0 --depth 1 \
+        https://github.com/MPI-SWS/genmc "$HOME/tools/genmc" &&
+    cmake -S "$HOME/tools/genmc" -B "$HOME/tools/genmc/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_PREFIX_PATH=/usr/lib/llvm-18 &&
+    make -C "$HOME/tools/genmc/build" -j"$(nproc)" ||
+    echo "WARN: GenMC build failed - test 16 will be skipped"
 fi
 
 echo

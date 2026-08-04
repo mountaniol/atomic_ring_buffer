@@ -37,6 +37,16 @@ struct ring_buf_cell_struct {
 
 typedef struct ring_buf_cell_struct cell_t;
 
+/** One 64B line of the default int64 ring: seq doubles as the publication
+ *  flag (0 = free, 1..7 = published count).  INTERNAL layout - exposed here
+ *  only as a typed view of the data section; never touch it directly. */
+#define RB_LINE_MSGS 7  /* int64 messages per 64B line; 8th slot is the flag */
+
+typedef struct {
+    _Atomic uint64_t seq;         /**< 0 = line free; 1..7 = valid messages */
+    int64_t msg[RB_LINE_MSGS];    /**< Payload slots */
+} rb_line_t;
+
 /*
  * Lock-free SPSC (single producer / single consumer) Ring Buffer.
  *
@@ -105,7 +115,17 @@ typedef struct {
     _Atomic uint32_t closed;         /**< rb_wake() called; one-way */
     uint8_t  _pad2b[64 - 5 * sizeof(uint32_t)];
 
-    unsigned char data[];     /**< Cells @384; layout depends on ring mode */
+    /* Cells @384.  Typed views of one storage, chosen by ring mode at
+     * creation; every byte is only ever accessed through the one view its
+     * instance was created with (union punning, defined in GNU C - no
+     * casts, no strict-aliasing questions).  [0] is the GNU zero-length
+     * array, the union-compatible spelling of a flexible array member. */
+    union {
+        int64_t   icells[0];      /**< int64 ring, -DRB_INT_INDEXED build */
+        rb_line_t lines[0];       /**< int64 ring, default (line format) */
+        cell_t    cells[0];       /**< ptr+size ring */
+        unsigned char data[0];    /**< byte view (offset anchor, shm) */
+    };
 } ring_buf_t;
 
 _Static_assert(offsetof(ring_buf_t, tail) == 128, "producer section @128");
@@ -113,6 +133,7 @@ _Static_assert(offsetof(ring_buf_t, est) == 192, "estimator on own line");
 _Static_assert(offsetof(ring_buf_t, head) == 256, "consumer section @256");
 _Static_assert(offsetof(ring_buf_t, csleep) == 320, "parking on own line");
 _Static_assert(offsetof(ring_buf_t, data) == 384, "data section @384");
+_Static_assert(sizeof(rb_line_t) == 64, "one cache line per rb_line_t");
 _Static_assert(sizeof(_Atomic uint64_t) == sizeof(uint64_t), "shm ABI");
 _Static_assert(sizeof(_Atomic uint32_t) == 4, "futex word ABI");
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,

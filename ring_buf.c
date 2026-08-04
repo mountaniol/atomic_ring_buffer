@@ -28,21 +28,10 @@
 #include <sys/syscall.h>
 #include "ring_buf.h"
 
-/* Views of the data[] section, per ring mode */
-#define INT_CELLS(d) ((int64_t *)(void *)(d)->data)
-#define PTR_CELLS(d) ((cell_t *)(void *)(d)->data)
-
-#ifndef RB_INT_INDEXED
-#define RB_LINE_MSGS 7  /* int64 messages per 64B line; 8th slot is the flag */
-
-typedef struct {
-    _Atomic uint64_t seq;         /* 0 = line free; 1..7 = valid messages */
-    int64_t msg[RB_LINE_MSGS];
-} rb_line_t;
-
-_Static_assert(sizeof(rb_line_t) == 64, "one cache line per rb_line_t");
-#define LINES(d) ((rb_line_t *)(void *)(d)->data)
-#endif
+/* Typed views of the data section (union members - no casts) */
+#define INT_CELLS(d) ((d)->icells)
+#define PTR_CELLS(d) ((d)->cells)
+#define LINES(d)     ((d)->lines)
 
 /**
  * @brief Allocate a zeroed, 128B-aligned, prefaulted buffer
@@ -460,9 +449,9 @@ int rb_pull_int_burst(ring_buf_t *d, int64_t *msgs, size_t n)
  * (~420 ns effective, measured in the 2026-08 open-loop study). */
 #ifndef RB_BATCH_TIDX_C16
 #ifdef RB_INT_INDEXED
-#define RB_BATCH_TIDX_C16 (1130 * 16)
+#define RB_BATCH_TIDX_C16 (1130ull * 16)
 #else
-#define RB_BATCH_TIDX_C16 (162 * 16)
+#define RB_BATCH_TIDX_C16 (162ull * 16)
 #endif
 #endif
 #ifndef RB_BATCH_A_C16
