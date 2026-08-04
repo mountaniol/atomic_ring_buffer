@@ -16,6 +16,9 @@
 const int loops_waiting = 10000;
 long num_messages = 500 * 1000000L;  /* millions; overridden by --samples */
 int use_wait = 0;                    /* --wait: rb_push_wait/rb_pull_wait */
+int batch_n = 0;                     /* --batch N: fixed burst size, 0 = off */
+int auto_batch = 0;                  /* --auto-batch: rb_batch_size() picks */
+#define BATCH_MAX 256                /* local batch buffer cap */
 size_t arr_size = 4096 * 2;
 
 /* Latency sampling: every LAT_SAMPLE-th message is timestamped by the
@@ -178,7 +181,39 @@ void *producer(__attribute__((unused))void *arg)
 
     /* Separate loops: the busy loop must stay as tiny as the original -
      * on HT siblings both threads share the uop cache and L1I */
-    if (w) {
+    if (batch_n || auto_batch) {
+        /* Batch mode: collect b values, push as one burst.  The latency
+         * stamp is taken when a value is GENERATED, so mean/max include
+         * the time it spends waiting inside the batch. */
+        int64_t bbuf[BATCH_MAX];
+        const int bn = batch_n;
+        for (int64_t i = 0; i < n; ) {
+            uint32_t b = bn ? (uint32_t)bn : rb_batch_size(rb);
+            if (b > BATCH_MAX)
+                b = BATCH_MAX;
+            if ((int64_t)b > n - i)
+                b = (uint32_t)(n - i);
+            for (uint32_t t = 0; t < b; t++) {
+                int64_t v = i + t;
+                if (0 == (v & (LAT_SAMPLE - 1)))
+                    lat_sent_ns[(v / LAT_SAMPLE) & (LAT_SLOTS - 1)] =
+                        get_time_ns();
+                bbuf[t] = v;
+            }
+            uint32_t done = 0;
+            int spins = 0;
+            while (done < b) {          /* burst never waits: retry the rest */
+                done += (uint32_t)rb_push_int_burst(rb, bbuf + done,
+                                                    b - done);
+                if (done < b && ++spins > loops_waiting) {
+                    miss_push++;
+                    sched_yield();
+                    spins = 0;
+                }
+            }
+            i += b;
+        }
+    } else if (w) {
         for (int64_t i = 0; i < n; i++) {
             if (0 == (i & (LAT_SAMPLE - 1)))
                 lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)] = get_time_ns();
@@ -227,7 +262,40 @@ void *consumer(__attribute__((unused))void *arg)
     uint64_t start_ns = get_time_ns(); // Start time
 
     /* Separate loops: keep the busy loop as tiny as the original */
-    if (w) {
+    if (batch_n || auto_batch) {
+        /* Batch mode: drain up to the batch size per call */
+        int64_t out[BATCH_MAX];
+        const uint32_t want = batch_n ? (uint32_t)batch_n : BATCH_MAX;
+        int spins = 0;
+        for (long i = 0; i < n; ) {
+            int k = rb_pull_int_burst(rb, out, want);
+            if (0 == k) {
+                if (++spins > loops_waiting) {
+                    miss_pull++;
+                    sched_yield();
+                    spins = 0;
+                }
+                continue;
+            }
+            spins = 0;
+            for (int t = 0; t < k; t++, i++) {
+                if (out[t] != i) {
+                    printf("Expected payload %ld but it is %ld\n", i,
+                           (long)out[t]);
+                    abort();
+                }
+                if (0 == (i & (LAT_SAMPLE - 1))) {
+                    double d = (double)(get_time_ns() -
+                                        lat_sent_ns[(i / LAT_SAMPLE) & (LAT_SLOTS - 1)]);
+                    lat_n++;
+                    lat_sum += d;
+                    lat_sum2 += d * d;
+                    if (d < lat_min) lat_min = d;
+                    if (d > lat_max) lat_max = d;
+                }
+            }
+        }
+    } else if (w) {
         for (long i = 0; i < n; i++) {
             int64_t idata = -1;
 
@@ -428,7 +496,9 @@ void usage(const char *prog)
            "  --same-core  producer and consumer on one logical CPU\n"
            "  --wait       use blocking rb_push_wait/rb_pull_wait (futex)\n"
            "  --samples N[mM]  messages to run, in millions (default 500m)\n"
-           "  --help       this text\n", prog);
+           "  --batch N    push/pull in bursts of N messages (1..%d)\n"
+           "  --auto-batch burst size chosen by rb_batch_size()\n"
+           "  --help       this text\n", prog, BATCH_MAX);
 }
 
 int main(int argc, char **argv)
@@ -441,6 +511,21 @@ int main(int argc, char **argv)
             return EXIT_SUCCESS;
         } else if (0 == strcmp(argv[i], "--wait")) {
             use_wait = 1;
+        } else if (0 == strcmp(argv[i], "--auto-batch")) {
+            auto_batch = 1;
+        } else if (0 == strcmp(argv[i], "--batch")) {
+            char *end;
+            long v;
+            if (++i >= argc) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+            v = strtol(argv[i], &end, 10);
+            if (v < 1 || v > BATCH_MAX || *end != '\0') {
+                fprintf(stderr, "Bad --batch value: %s\n", argv[i]);
+                return EXIT_FAILURE;
+            }
+            batch_n = (int)v;
         } else if (0 == strcmp(argv[i], "--samples")) {
             char *end;
             long v;
@@ -464,6 +549,14 @@ int main(int argc, char **argv)
     }
     if (NULL == placement) {
         usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    if ((batch_n || auto_batch) && use_wait) {
+        fprintf(stderr, "--batch/--auto-batch cannot be combined with --wait\n");
+        return EXIT_FAILURE;
+    }
+    if (batch_n && auto_batch) {
+        fprintf(stderr, "--batch and --auto-batch are mutually exclusive\n");
         return EXIT_FAILURE;
     }
 
@@ -498,8 +591,14 @@ int main(int argc, char **argv)
     printf("Placement %s: producer CPU %d, consumer CPU %d\n",
            placement, cpu_prod, cpu_cons);
     printf("Array size: %ld\n", arr_size);
-    printf("Samples: %ldm%s\n", num_messages / 1000000L,
-           use_wait ? ", mode: wait (futex)" : "");
+    char modebuf[32] = "";
+    if (use_wait)
+        snprintf(modebuf, sizeof(modebuf), ", mode: wait (futex)");
+    else if (auto_batch)
+        snprintf(modebuf, sizeof(modebuf), ", mode: auto-batch");
+    else if (batch_n)
+        snprintf(modebuf, sizeof(modebuf), ", mode: batch %d", batch_n);
+    printf("Samples: %ldm%s\n", num_messages / 1000000L, modebuf);
 
     /* Just for nice printing */
     setlocale(LC_ALL, "");
