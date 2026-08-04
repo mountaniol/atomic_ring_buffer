@@ -1,0 +1,2 @@
+SKIP: genmc not installed - run deploy-tests-ubuntu.sh --with-genmc
+ERRORS: 0

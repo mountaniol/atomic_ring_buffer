@@ -1,0 +1,34 @@
+
+== drop 50% of wakeups (RB_DROP_MOD=2)
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -DRB_WAIT_SPIN=0 -DRB_WAIT_RECHECK_NS=50000 -DRB_DROP_MOD=2  /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/tests/build/11-ring_buf_drop.c -> build/11-drop2-line
+-- run: timeout 300 /home/se/src/me/ring_buf1/tests/build/11-drop2-line 100000 quick
+parking FIFO done (100000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: wake-drop 50% line heals
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -DRB_WAIT_SPIN=0 -DRB_WAIT_RECHECK_NS=50000 -DRB_DROP_MOD=2 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/tests/build/11-ring_buf_drop.c -> build/11-drop2-idx
+-- run: timeout 300 /home/se/src/me/ring_buf1/tests/build/11-drop2-idx 100000 quick
+parking FIFO done (100000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: wake-drop 50% idx heals
+
+== drop 90% of wakeups (RB_DROP_MOD=10)
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -DRB_WAIT_SPIN=0 -DRB_WAIT_RECHECK_NS=50000 -DRB_DROP_MOD=10  /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/tests/build/11-ring_buf_drop.c -> build/11-drop10-line
+-- run: timeout 300 /home/se/src/me/ring_buf1/tests/build/11-drop10-line 100000 quick
+parking FIFO done (100000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: wake-drop 90% line heals
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -DRB_WAIT_SPIN=0 -DRB_WAIT_RECHECK_NS=50000 -DRB_DROP_MOD=10 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/tests/build/11-ring_buf_drop.c -> build/11-drop10-idx
+-- run: timeout 300 /home/se/src/me/ring_buf1/tests/build/11-drop10-idx 100000 quick
+parking FIFO done (100000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: wake-drop 90% idx heals
+
+ERRORS: 0

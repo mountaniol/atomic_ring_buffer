@@ -1,0 +1,33 @@
+found 20 protocol edges (idx section 198-317-447)
+
+== baseline: unmutated builds must be TSan-clean
+-- build: clang -fsanitize=thread -O2 -g -std=c11  /home/se/src/me/ring_buf1/tests/06-tsan-modes.c /home/se/src/me/ring_buf1/ring_buf.c -> build/07-base-line
+ok: baseline line clean
+-- build: clang -fsanitize=thread -O2 -g -std=c11 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/06-tsan-modes.c /home/se/src/me/ring_buf1/ring_buf.c -> build/07-base-idx
+ok: baseline idx clean
+
+== mutants: one edge at a time -> TSan must warn
+KILLED  line 160 [line] (2 warnings): d->head_shadow = atomic_load_explicit(&d->head, memory_order_acquire);
+KILLED  line 171 [line] (2 warnings): atomic_store_explicit(&d->tail, tail + 1, memory_order_release);
+KILLED  line 183 [line] (2 warnings): d->tail_shadow = atomic_load_explicit(&d->tail, memory_order_acquire);
+KILLED  line 194 [line] (2 warnings): atomic_store_explicit(&d->head, head + 1, memory_order_release);
+KILLED  line 213 [idx] (3 warnings): d->head_shadow = atomic_load_explicit(&d->head, memory_order_acquire);
+KILLED  line 220 [idx] (3 warnings): atomic_store_explicit(&d->tail, tail + 1, memory_order_release);
+KILLED  line 236 [idx] (3 warnings): d->tail_shadow = atomic_load_explicit(&d->tail, memory_order_acquire);
+KILLED  line 243 [idx] (3 warnings): atomic_store_explicit(&d->head, head + 1, memory_order_release);
+KILLED  line 262 [idx] (1 warnings): d->head_shadow = atomic_load_explicit(&d->head, memory_order_acquire);
+KILLED  line 280 [idx] (1 warnings): atomic_store_explicit(&d->tail, tail + n, memory_order_release);
+KILLED  line 297 [idx] (1 warnings): d->tail_shadow = atomic_load_explicit(&d->tail, memory_order_acquire);
+KILLED  line 313 [idx] (1 warnings): atomic_store_explicit(&d->head, head + n, memory_order_release);
+KILLED  line 332 [line] (5 warnings): atomic_load_explicit(&ln->seq, memory_order_acquire) != 0)
+KILLED  line 338 [line] (5 warnings): atomic_store_explicit(&ln->seq, off + 1, memory_order_release);
+KILLED  line 360 [line] (6 warnings): if (atomic_load_explicit(&ln->seq, memory_order_acquire) <= off)
+KILLED  line 368 [line] (5 warnings): atomic_store_explicit(&ln->seq, 0, memory_order_release);
+KILLED  line 391 [line] (1 warnings): atomic_load_explicit(&ln->seq, memory_order_acquire) != 0)
+KILLED  line 400 [line] (1 warnings): atomic_store_explicit(&ln->seq, off + k, memory_order_release);
+KILLED  line 424 [line] (1 warnings): uint64_t seq = atomic_load_explicit(&ln->seq, memory_order_acquire);
+KILLED  line 438 [line] (1 warnings): atomic_store_explicit(&ln->seq, 0, memory_order_release);
+
+mutation score: 20 of 20 edges killed by TSan
+
+ERRORS: 0

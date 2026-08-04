@@ -1,0 +1,20 @@
+
+== line format
+-- run: /home/se/src/me/ring_buf1/tests/build/03-func-wait-line
+parking FIFO done (2000000 msgs, ring 64)
+timeouts done
+rb_wake done
+wake latency (parked): p50=15.1us p90=119.7us max=122.2us
+ERRORS: 0
+ok: 03 line
+
+== RB_INT_INDEXED
+-- run: /home/se/src/me/ring_buf1/tests/build/03-func-wait-idx
+parking FIFO done (2000000 msgs, ring 64)
+timeouts done
+rb_wake done
+wake latency (parked): p50=14.1us p90=121.2us max=128.4us
+ERRORS: 0
+ok: 03 idx
+
+ERRORS: 0

@@ -1,0 +1,32 @@
+
+== x86_64: hot functions free of mfence/lock/xchg (linked LTO binaries)
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer  /home/se/src/me/ring_buf1/tests/13-asm-audit.c /home/se/src/me/ring_buf1/ring_buf.c -> build/13-audit-line
+ok: x86 line rb_push_int: clean
+ok: x86 line rb_pull_int: clean
+ok: x86 line rb_push_int_burst: clean
+ok: x86 line rb_pull_int_burst: clean
+ok: x86 line rb_push_ptr: clean
+ok: x86 line rb_pull_ptr: clean
+-- build: gcc -Wall -Wextra -std=c11 -O3 -march=native -flto -funroll-loops -fomit-frame-pointer -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/13-asm-audit.c /home/se/src/me/ring_buf1/ring_buf.c -> build/13-audit-idx
+ok: x86 idx rb_push_int: clean
+ok: x86 idx rb_pull_int: clean
+ok: x86 idx rb_push_int_burst: clean
+ok: x86 idx rb_pull_int_burst: clean
+ok: x86 idx rb_push_ptr: clean
+ok: x86 idx rb_pull_ptr: clean
+
+== x86_64: wait path MUST carry its seq_cst RMWs/fence
+ok: x86 line wait path: RMW/fence present
+ok: x86 idx wait path: RMW/fence present
+
+== aarch64 cross codegen (clang -S)
+ok: a64 line: no ldapr
+ok: a64 line rb_push_int: ldar+stlr, no dmb
+ok: a64 line rb_pull_int: ldar+stlr, no dmb
+ok: a64 line: wait-path dmb present
+ok: a64 idx: no ldapr
+ok: a64 idx rb_push_int: ldar+stlr, no dmb
+ok: a64 idx rb_pull_int: ldar+stlr, no dmb
+ok: a64 idx: wait-path dmb present
+
+ERRORS: 0

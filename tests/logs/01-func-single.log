@@ -1,0 +1,28 @@
+
+== line format
+-- run: /home/se/src/me/ring_buf1/tests/build/01-func-single-line
+Number of cells must be power of 2
+Number of cells must be power of 2
+Number of cells must be power of 2
+contracts done
+int laps done (capacity 7)
+ptr laps done
+2-thread int done (3000000 msgs)
+2-thread ptr done (750000 msgs)
+ERRORS: 0
+ok: 01 line
+
+== RB_INT_INDEXED
+-- run: /home/se/src/me/ring_buf1/tests/build/01-func-single-idx
+Number of cells must be power of 2
+Number of cells must be power of 2
+Number of cells must be power of 2
+contracts done
+int laps done (capacity 8)
+ptr laps done
+2-thread int done (3000000 msgs)
+2-thread ptr done (750000 msgs)
+ERRORS: 0
+ok: 01 idx
+
+ERRORS: 0

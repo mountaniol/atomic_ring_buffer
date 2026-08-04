@@ -1,0 +1,56 @@
+
+== variant: line
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11  /home/se/src/me/ring_buf1/tests/01-func-single.c /home/se/src/me/ring_buf1/ring_buf.c -> build/01-func-single-asan-line
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/01-func-single-asan-line 300000 quick
+Number of cells must be power of 2
+Number of cells must be power of 2
+Number of cells must be power of 2
+contracts done
+int laps done (capacity 7)
+ptr laps done
+2-thread int done (300000 msgs)
+2-thread ptr done (75000 msgs)
+ERRORS: 0
+ok: 01-func-single line asan+ubsan
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11  /home/se/src/me/ring_buf1/tests/02-func-burst.c /home/se/src/me/ring_buf1/ring_buf.c -> build/02-func-burst-asan-line
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/02-func-burst-asan-line 300000 quick
+single-thread burst done
+2-thread burst done (300000 msgs)
+ERRORS: 0
+ok: 02-func-burst line asan+ubsan
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11  /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/ring_buf.c -> build/03-func-wait-asan-line
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/03-func-wait-asan-line 300000 quick
+parking FIFO done (300000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: 03-func-wait line asan+ubsan
+
+== variant: idx
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/01-func-single.c /home/se/src/me/ring_buf1/ring_buf.c -> build/01-func-single-asan-idx
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/01-func-single-asan-idx 300000 quick
+Number of cells must be power of 2
+Number of cells must be power of 2
+Number of cells must be power of 2
+contracts done
+int laps done (capacity 8)
+ptr laps done
+2-thread int done (300000 msgs)
+2-thread ptr done (75000 msgs)
+ERRORS: 0
+ok: 01-func-single idx asan+ubsan
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/02-func-burst.c /home/se/src/me/ring_buf1/ring_buf.c -> build/02-func-burst-asan-idx
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/02-func-burst-asan-idx 300000 quick
+single-thread burst done
+2-thread burst done (300000 msgs)
+ERRORS: 0
+ok: 02-func-burst idx asan+ubsan
+-- build: gcc -fsanitize=address,undefined -fno-sanitize-recover=all -O2 -g -Wall -Wextra -std=c11 -DRB_INT_INDEXED /home/se/src/me/ring_buf1/tests/03-func-wait.c /home/se/src/me/ring_buf1/ring_buf.c -> build/03-func-wait-asan-idx
+-- run: timeout 240 /home/se/src/me/ring_buf1/tests/build/03-func-wait-asan-idx 300000 quick
+parking FIFO done (300000 msgs, ring 64)
+timeouts done
+rb_wake done
+ERRORS: 0
+ok: 03-func-wait idx asan+ubsan
+
+ERRORS: 0

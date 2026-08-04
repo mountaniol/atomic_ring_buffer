@@ -1,0 +1,20 @@
+
+== root make (library + benchmark binaries)
+-- run: make -C /home/se/src/me/ring_buf1 -s
+ok: root make
+
+== library compiles warning-free with -Werror (both variants, gcc+clang)
+-- gcc line
+ok: compile gcc line
+-- gcc -DRB_INT_INDEXED
+ok: compile gcc -DRB_INT_INDEXED
+-- clang line
+ok: compile clang line
+-- clang -DRB_INT_INDEXED
+ok: compile clang -DRB_INT_INDEXED
+
+== functional test binaries (tests/Makefile)
+-- run: make -C /home/se/src/me/ring_buf1/tests -s
+ok: tests make
+
+ERRORS: 0

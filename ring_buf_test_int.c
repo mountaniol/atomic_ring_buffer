@@ -320,24 +320,33 @@ int get_cpu_stats(cpu_stats_t *stats, int num_cpus)
     }
 
     char line[256];
-    int cpu_index = 0;
+    int cpu_index;
+    int filled = 0;
+
+    /* Unfilled rows (offline cores) stay zero: the caller skips them via
+     * its total_delta == 0 check */
+    memset(stats, 0, sizeof(*stats) * (size_t)num_cpus);
 
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "cpu", 3) != 0) break; // Stop at non-CPU lines
-        if (cpu_index == 0) continue; // Skip total CPU stats (first line)
+        if (line[3] < '0' || line[3] > '9') continue; // Skip aggregate "cpu " line
 
-        sscanf(line, "cpu%d %ld %ld %ld %ld %ld %ld %ld %ld",
-               &cpu_index,
-               &stats[cpu_index - 1].user, &stats[cpu_index - 1].nice,
-               &stats[cpu_index - 1].system, &stats[cpu_index - 1].idle,
-               &stats[cpu_index - 1].iowait, &stats[cpu_index - 1].irq,
-               &stats[cpu_index - 1].softirq, &stats[cpu_index - 1].steal);
+        /* Parse into a local row first: sscanf computes its argument
+         * addresses before assigning cpu_index */
+        cpu_stats_t s;
+        if (sscanf(line, "cpu%d %ld %ld %ld %ld %ld %ld %ld %ld",
+                   &cpu_index, &s.user, &s.nice, &s.system, &s.idle,
+                   &s.iowait, &s.irq, &s.softirq, &s.steal) != 9)
+            continue; // Malformed line
+        if (cpu_index < 0 || cpu_index >= num_cpus)
+            continue; // Core id outside the caller's array
 
-        if (cpu_index >= num_cpus) break;
+        stats[cpu_index] = s; // "cpuN" ids are 0-based, as is stats[]
+        filled++;
     }
 
     fclose(fp);
-    return 0;
+    return filled > 0 ? 0 : -1;
 }
 
 /* Finds the two least busy cores */

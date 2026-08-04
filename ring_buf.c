@@ -485,25 +485,38 @@ static inline uint64_t rb_cycles(void)
 #endif
 }
 
-uint32_t rb_batch_size(ring_buf_t *d)
+/* Sampling pass, 1 call in 64.  noinline keeps rb_batch_size() itself tiny
+ * so LTO inlines the fast path into the caller's loop without dragging
+ * this cold code into its uop-cache footprint. */
+static __attribute__((noinline)) uint32_t rb_batch_calc(ring_buf_t *d)
 {
-    if (__builtin_expect(!d, 0))
-        return 1;
+    uint64_t *e = d->est;
 
-    uint64_t *e = d->est;   /* [0] call cnt, [1] t_last, [2] ewma, [3] B */
-
-    /* 63 of 64 calls: just return the last computed B (1 until warmed up) */
-    if (__builtin_expect((++e[0] & 63) != 0, 1))
+    /* Measure how fast the producer really runs */
+    uint64_t t = rb_cycles();
+    uint64_t prev = e[1];
+    e[1] = t;
+    /* No previous sample yet (prev 0), clock stepped back, or stalled
+     * (coarse ARM timer): only record t, keep the last B */
+    if (t <= prev || 0 == prev)
         return e[3] ? (uint32_t)e[3] : 1;
 
-    /* Every 64th call: measure how fast the producer really runs */
-    uint64_t t = rb_cycles();
-    uint64_t dc = t - e[1];             /* cycles spent on 64 messages */
-    e[1] = t;
-    /* Smooth it: new = old + (sample - old)/8 */
-    e[2] = e[2] ? e[2] + (uint64_t)(((int64_t)dc - (int64_t)e[2]) >> 3) : dc;
+    uint64_t dc = t - prev;             /* cycles spent on 64 messages */
+    /* Smooth it: new = old +- |sample - old|/8; branchy form is wrap-free
+     * for ANY inputs (result always lands between old and sample) */
+    if (0 == e[2])
+        e[2] = dc;                      /* seed with the first real sample */
+    else if (dc >= e[2])
+        e[2] += (dc - e[2]) >> 3;
+    else
+        e[2] -= (e[2] - dc) >> 3;
 
     uint64_t d16 = e[2] / 4;            /* d^ = cycles*16 per one message */
+    if (d16 >> 32) {                    /* clock jumped: absurdly slow; also
+                                           keeps the scaling below wrap-free */
+        e[3] = 1;
+        return 1;
+    }
     uint64_t rho_d = (d16 * 109) >> 7;  /* d^ scaled to 85% utilization */
     uint64_t b;
 
@@ -522,6 +535,20 @@ uint32_t rb_batch_size(ring_buf_t *d)
         b = 1;
     e[3] = b;
     return (uint32_t)b;
+}
+
+uint32_t rb_batch_size(ring_buf_t *d)
+{
+    if (__builtin_expect(!d, 0))
+        return 1;
+
+    uint64_t *e = d->est;   /* [0] call cnt, [1] t_last, [2] ewma, [3] B */
+
+    /* 63 of 64 calls: just return the last computed B (1 until warmed up) */
+    if (__builtin_expect((++e[0] & 63) != 0, 1))
+        return e[3] ? (uint32_t)e[3] : 1;
+
+    return rb_batch_calc(d);
 }
 
 /*
