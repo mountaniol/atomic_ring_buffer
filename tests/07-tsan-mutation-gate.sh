@@ -4,6 +4,18 @@
 # TIMEOUT: 1200
 . "$(dirname "$0")/common.sh"
 
+cat <<'EOF'
+This gate breaks the library on purpose, one memory-ordering annotation at a
+time, and requires ThreadSanitizer to notice.  An acquire or a release that can
+be downgraded to relaxed without any test failing was never doing any work.
+
+  KILLED   = TSan caught the injected fault.  This is the DESIRED outcome.
+  SURVIVED = the fault went unnoticed - a real gap, and a failure of this test.
+
+A run is good when every edge is KILLED and the baseline builds are clean.
+
+EOF
+
 # Protocol edges: acquire/release operations on seq (line format) or
 # head/tail (indexed + ptr).  Recomputed from the source each run, so the
 # gate survives line-number drift.  Futex-section edges (closed/doors) are

@@ -46,6 +46,7 @@ R_MAX       = 12                  # ceiling; flagged beyond this
 CI_TARGET   = 0.01                # stop when CI halfwidth <= 1% of median
 BOOT_N      = 2000                # bootstrap resamples
 RUN_TIMEOUT = 120                 # seconds per single benchmark run
+UNSTABLE_IQR = 0.03               # spread above any converged config's
 VARIANTS    = ["line", "idx"]
 PLACEMENTS  = ["--cores", "--siblings", "--same-core"]
 BATCHES     = [1, 2, 4, 7, 8, 14, 16, 28, 32, 64, 128, 256]
@@ -274,9 +275,32 @@ def reps_needed(runs):
     return math.ceil(len(runs) * (hw / CI_TARGET) ** 2)
 
 
+def spread(runs):
+    """Interquartile spread of the throughput, relative to the median."""
+    xs = sorted(r["tput"] for r in runs)
+    n = len(xs)
+    if n < 4:
+        return 0.0
+    med = statistics.median(xs)
+    return (xs[int(.75 * (n - 1))] - xs[int(.25 * (n - 1))]) / med if med else 0
+
+
 def fmt_need(runs):
+    """What to say about a configuration that did not converge.
+
+    reps_needed() assumes the runs are independent draws from one stable
+    distribution, so that the CI falls like 1/sqrt(n).  Measured on this
+    benchmark that assumption fails for some configurations: 60 repetitions
+    of one of them left the CI at 14% where the law predicted 6%.  Those
+    configurations flip between regimes run to run, and repeating them is a
+    waste - so they are reported as unstable instead of being given a
+    reps estimate nobody should act on.  The threshold is set just above the
+    widest spread any CONVERGED configuration shows."""
+    s = spread(runs)
+    if s > UNSTABLE_IQR:
+        return f"unstable ±{s * 100:.0f}%"
     n = reps_needed(runs)
-    return f"~{n}" if n <= 200 else ">200"
+    return f"needs ~{n}" if n <= 200 else "needs >200"
 
 
 def converged(runs):
@@ -397,12 +421,19 @@ def champions(runs, failed):
                 "p01": hist_pct(pooled, .01), "p50": hist_pct(pooled, .50),
                 "p99": hist_pct(pooled, .99), "p999": hist_pct(pooled, .999),
                 "inflight": tp * mn / 1e9,      # Little's law: L = lambda*W
+                "tputci": ci_halfwidth(runs[c]),
+                "conv": converged(runs[c]),
             }
+        # A median with a wide confidence interval can win a title by luck, so
+        # the pool is the configurations that actually converged.  Only when
+        # NONE of them did does the whole set compete - and then every winner
+        # is flagged, here and on screen.
+        pool = [c for c in cs if stat[c]["conv"]] or cs
         pick = {
-            "fast": max(cs, key=lambda c: (stat[c]["tput"], -stat[c]["p99"])),
-            "calm": min(cs, key=lambda c: (stat[c]["p99"], -stat[c]["tput"])),
-            "quick": min(cs, key=lambda c: (stat[c]["mean"],
-                                            -stat[c]["tput"])),
+            "fast": max(pool, key=lambda c: (stat[c]["tput"], -stat[c]["p99"])),
+            "calm": min(pool, key=lambda c: (stat[c]["p99"], -stat[c]["tput"])),
+            "quick": min(pool, key=lambda c: (stat[c]["mean"],
+                                              -stat[c]["tput"])),
         }
         # the bootstrap is only worth its cost on the nine configs that win
         for c in set(pick.values()):
@@ -411,7 +442,7 @@ def champions(runs, failed):
         near = {}
         for g, key in (("fast", "tput"), ("calm", "p99"), ("quick", "mean")):
             w = stat[pick[g]][key]
-            near[g] = [c[0] + " " + c[2] for c in cs if c != pick[g]
+            near[g] = [c[0] + " " + c[2] for c in pool if c != pick[g]
                        and abs(stat[c][key] - w) <= 0.01 * w]
         out[pl] = dict(pick, stat=stat, near=near)
     return out
@@ -483,7 +514,9 @@ def panel_top(goal):
 
 
 def panel_sub(cfg, st):
-    head = f" {cfg[0]} {cfg[2]} · {st['tput'] / 1e6:.0f} M/s"
+    # "!" = the median never converged, so this title was won on a coin toss
+    mark = "" if st.get("conv", True) else "!"
+    head = f" {cfg[0]} {cfg[2]} · {st['tput'] / 1e6:.0f} M/s{mark}"
     s = f"{head} · {st['reps']}r"          # drop the rep count if it a-
     if len(s) > PANEL - 2:                 # would be cut mid-token
         s = head
@@ -616,7 +649,8 @@ def print_latency_summary(champs, rt=True):
                 continue
             s, c, pl = best[g]
             p(f"   {txt[g]:<22}-> {c[0] + ' ' + c[2]:<12} on "
-              f"{pl.lstrip('-'):<10} {num[g](s)}")
+              f"{pl.lstrip('-'):<10} {num[g](s)}"
+              + ("" if s.get("conv", True) else "   (! unconverged)"))
         p(" Measure your own producer rate first: if it stays below the")
         p(" consumer's capacity the ring never fills, and the 'floor' figure")
         p(" is what you will actually see - not the middle of the histogram.")
@@ -650,7 +684,7 @@ Columns:
 
 | Column         | Meaning                                                                            |
 |----------------|------------------------------------------------------------------------------------|
-| `reps`         | how many runs the script needed until the throughput median was statistically solid: 95% confidence interval within +-{CI_TARGET:.0%}.  `N! (~M)` = target NOT reached after N runs; ~M runs would be needed |
+| `reps`         | how many runs the script needed until the throughput median was statistically solid: 95% confidence interval within +-{CI_TARGET:.0%}.  `N! (needs ~M)` = not reached after N runs, and M runs should get there.  `N! (unstable +-X%)` = the configuration itself flips between regimes run to run, so repeating it does NOT help - X% is the spread between its quartiles, and no converged configuration here exceeds {UNSTABLE_IQR:.0%} |
 | `tput M/s`     | median throughput over the reps, million messages per second                       |
 | `CI +-%`       | actual confidence-interval halfwidth of that median, in percent                    |
 | `lat min/mean` | latency of individual messages, nanoseconds (median over reps).  Stamped when the message is CREATED, so batching delay is included.  In this saturated test `mean` is mostly QUEUE waiting time, not transfer cost - `min` is the true transfer floor |
@@ -707,7 +741,7 @@ def collect():
             if n >= R_MIN:
                 hw = ci_halfwidth(runs[c])
                 status = ("converged" if hw <= CI_TARGET
-                          else f"needs {fmt_need(runs[c])} reps total")
+                          else fmt_need(runs[c]))
                 print(f"   {c[0]:4s} {c[1]:10s} {c[2]:6s}: "
                       f"{r['tput'] / 1e6:7.1f} M/s  "
                       f"CI ±{hw:.1%} -> {status}")
@@ -778,26 +812,39 @@ def make_report(runs, failed, champs):
     rep.append("For every way of placing the two threads, the configuration "
                "that wins each of the three goals a user actually has.  The "
                "screen summary draws the full distribution of these same "
-               "nine configurations.\n")
+               "nine configurations.  Only configurations whose median "
+               f"throughput converged to ±{CI_TARGET:.0%} may win; a winner "
+               "marked `!` did not, because nothing in that placement did, "
+               "and its ranking is then worth no more than its interval.\n")
     rows = []
+    unconv = False
     for pl in PLACEMENTS:
         ch = champs.get(pl)
         if not ch:
-            rows.append([pl, "-", "no data", "", "", "", "", "", ""])
+            rows.append([pl, "-", "no data"] + [""] * 9)
             continue
         for g, title, _ in GOALS:
             c = ch[g]
             s = ch["stat"][c]
             tied = ", ".join(ch["near"][g][:3]) or "-"
             ci = s.get("p99ci", math.inf)
-            rows.append([pl, title, f"{c[0]} {c[2]}",
-                         f"{s['tput'] / 1e6:.0f}", fmt_ns(s["p01"]),
+            unconv = unconv or not s["conv"]
+            rows.append([pl, title,
+                         f"{c[0]} {c[2]}" + ("" if s["conv"] else " !"),
+                         f"{s['tput'] / 1e6:.0f}", f"{s['tputci'] * 100:.1f}",
+                         fmt_ns(s["p01"]),
                          fmt_ns(s["p50"]), fmt_ns(s["p99"]),
                          "n/a" if math.isinf(ci) else f"{ci * 100:.1f}",
                          fmt_ns(s["p999"]), f"{s['inflight']:.0f}", tied])
     rep.extend(render_table(["placement", "goal", "winner", "tput M/s",
-                             "floor", "p50", "p99", "p99 ±%", "p99.9",
-                             "in ring", "within 1%"], rows))
+                             "tput ±%", "floor", "p50", "p99", "p99 ±%",
+                             "p99.9", "in ring", "within 1%"], rows))
+    if unconv:
+        rep.append("\n**A `!` above means the run was too noisy to rank.**  "
+                   "Re-run on an otherwise idle machine before acting on "
+                   "those rows: a median with a wide interval can take a "
+                   "title by luck, and some configurations on some machines "
+                   "are bimodal, so more repetitions do not always help.")
 
     rep.append("\nShare of messages per delay band, pooled over all reps "
                "of the winning configuration:\n")
@@ -843,7 +890,8 @@ def make_report(runs, failed, champs):
                     fmt_ns(s.get("p999", 0)), f"{mx_abs}",
                     f"{s.get('inflight', 0):.0f}",
                     f"{med(c, 'miss_prod'):.0f}/{med(c, 'miss_cons'):.0f}"])
-                overall.append((mtput(c), med(c, "lat_mean"), c))
+                overall.append((mtput(c), med(c, "lat_mean"), c,
+                                converged(runs[c])))
             rep.extend(render_table(headers, rows))
 
             # regression over fixed-B rows: ns/msg = a + T/B
@@ -862,10 +910,13 @@ def make_report(runs, failed, champs):
                            f"a = {a:.2f} ns/msg,  T = {T:.1f} ns/batch,  "
                            f"R² = {r2:.3f}{ceil_txt}")
 
-                # ---- plain-language summary for this table
-                best_b, best_c = max(pts, key=lambda p: mtput(p[1]))
+                # ---- plain-language summary for this table.  Quote only
+                # batch sizes whose median converged: an unconverged row can
+                # top the table on luck and would send the reader after it.
+                cpts = [p for p in pts if converged(runs[p[1]])] or pts
+                best_b, best_c = max(cpts, key=lambda p: mtput(p[1]))
                 bt = mtput(best_c)
-                knee = next((b for b, c in pts
+                knee = next((b for b, c in cpts
                              if mtput(c) >= 0.99 * bt), best_b)
                 lines = ["\nIn plain words:"]
                 if runs.get(single):
@@ -1049,12 +1100,19 @@ def make_report(runs, failed, champs):
     # ------------------------------------------------- global conclusions
     if overall:
         rep.append("\n## Bottom line across everything\n")
-        bt, bl, bc = max(overall, key=lambda t: t[0])
+        # same rule as the champions table: a median that never converged is
+        # not a result, so it cannot be quoted as the best of anything
+        pool = [t for t in overall if t[3]] or overall
+        if len(pool) < len(overall):
+            rep.append(f"Quoting only the {len(pool)} of {len(overall)} "
+                       f"configurations whose median throughput converged to "
+                       f"±{CI_TARGET:.0%}; the rest were too noisy to rank.\n")
+        bt, bl, bc, _ = max(pool, key=lambda t: t[0])
         rep.append(f"- Fastest overall: {bc[0]} {bc[1]} {bc[2]} - "
                    f"{bt / 1e6:.0f} M msg/s"
                    + (".  The 1 G msg/s goal is met."
                       if bt >= 1e9 else "."))
-        lt = min(overall, key=lambda t: t[1])
+        lt = min(pool, key=lambda t: t[1])
         rep.append(f"- Lowest mean latency: {lt[2][0]} {lt[2][1]} "
                    f"{lt[2][2]} - {lt[1]:.0f} ns at "
                    f"{lt[0] / 1e6:.0f} M msg/s.")
@@ -1072,9 +1130,9 @@ def make_report(runs, failed, champs):
                        f"because it keeps {fs['inflight']:.0f} messages "
                        f"queued inside the ring against "
                        f"{ps['inflight']:.0f}.")
-        best_line = max((t for t in overall if t[2][0] == "line"),
+        best_line = max((t for t in pool if t[2][0] == "line"),
                         key=lambda t: t[0], default=None)
-        best_idx = max((t for t in overall if t[2][0] == "idx"),
+        best_idx = max((t for t in pool if t[2][0] == "idx"),
                        key=lambda t: t[0], default=None)
         if best_line and best_idx:
             rep.append(f"- Variant effect: with batching the idx variant "

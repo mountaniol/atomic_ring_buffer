@@ -194,8 +194,7 @@ void set_my_prio(void)
  */
 void *producer(__attribute__((unused))void *arg)
 {
-    set_my_cpu(cpu_prod);
-    set_my_prio();
+    set_my_cpu(cpu_prod);   /* priority is inherited from main */
 
     /* Local copies: keep the hot loop free of global reloads (perf: the
      * ring_buf global was re-loaded + NULL-tested on every message) */
@@ -283,8 +282,7 @@ void *producer(__attribute__((unused))void *arg)
  */
 void *consumer(__attribute__((unused))void *arg)
 {
-    set_my_cpu(cpu_cons);
-    set_my_prio();
+    set_my_cpu(cpu_cons);   /* priority is inherited from main */
 
     double lat_sum = 0, lat_sum2 = 0, lat_min = 1e18, lat_max = 0;
     long lat_n = 0;
@@ -671,6 +669,14 @@ int main(int argc, char **argv)
     }
 
     pthread_t prod_thread, cons_thread;
+
+    /* Raise priority BEFORE creating the threads: pthread_create defaults to
+     * PTHREAD_INHERIT_SCHED, so both are born at this priority.  A thread that
+     * raised its own priority after pinning itself would spend the window
+     * between the two calls as an ordinary task on a CPU that may already be
+     * owned by a real-time spinner - and on --same-core it would wait there
+     * for the whole sched_rt_runtime_us quota (950 ms by default). */
+    set_my_prio();
 
     /* Start producer and consumer threads */
     pthread_create(&prod_thread, NULL, producer, NULL);

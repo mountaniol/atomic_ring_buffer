@@ -76,8 +76,7 @@ static int sibling_of(int cpu)
 
 static void *pong(__attribute__((unused)) void *arg)
 {
-    set_cpu(cpu_b);
-    set_fifo();
+    set_cpu(cpu_b);         /* priority is inherited from main */
 
     for (long i = 0; i < warmup + iters + batches * batch_k; i++) {
         int64_t v;
@@ -148,12 +147,16 @@ int main(int argc, char **argv)
 
     pthread_t t;
 
+    /* Priority first: pthread_create defaults to PTHREAD_INHERIT_SCHED, so the
+     * pong thread is born at this priority instead of spending its first
+     * instants as an ordinary task on a CPU a real-time spinner may own. */
+    set_fifo();
+
     if (pthread_create(&t, NULL, pong, NULL) != 0) {
         perror("pthread_create");
         return EXIT_FAILURE;
     }
     set_cpu(cpu_a);
-    set_fifo();
 
     /* Timer cost: each sample includes ~2 clock_gettime calls */
     uint64_t t0 = now_ns();
